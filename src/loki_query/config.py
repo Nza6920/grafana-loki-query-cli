@@ -45,6 +45,10 @@ def load_config(path: Path) -> AppConfig:
         raise ConfigurationError(f"Configuration file not found: {path}") from error
     except tomllib.TOMLDecodeError as error:
         raise ConfigurationError(f"Invalid TOML in {path}: {error}") from error
+    except UnicodeDecodeError as error:
+        raise ConfigurationError(
+            f"Configuration file must be UTF-8: {path}."
+        ) from error
     except OSError as error:
         detail = error.strerror or error.__class__.__name__
         raise ConfigurationError(

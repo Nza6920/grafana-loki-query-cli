@@ -164,6 +164,17 @@ token_env = "GRAFANA_TOKEN"
         self.assertIn("absolute HTTP(S) URL", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_config_reports_non_utf8_toml_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_bytes(b"[profiles.prod]\nname = \xff\n")
+
+            result = run_cli("--config", str(config_path), "config", "validate")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must be UTF-8", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
 
 class QueryTests(unittest.TestCase):
     def test_end_is_only_valid_with_absolute_start(self) -> None:
