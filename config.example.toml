@@ -1,0 +1,11 @@
+[profiles.prod]
+grafana_url = "https://grafana-prod.newchiwan.cn"
+datasource_uid = "aPOoJEvIk"
+token_env = "GRAFANA_TOKEN"
+default_selector = '{namespace="newchiwan-prod"}'
+
+[profiles.staging]
+grafana_url = "https://grafana-staging.example.com"
+datasource_uid = "replace-with-datasource-uid"
+token_env = "GRAFANA_STAGING_TOKEN"
+default_selector = '{namespace="newchiwan-staging"}'

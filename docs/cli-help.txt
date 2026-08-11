@@ -1,0 +1,54 @@
+$ loki-query --help
+usage: loki-query [-h] [--config CONFIG] {query,profiles,config} ...
+
+Query Loki logs through a Grafana datasource proxy.
+
+positional arguments:
+  {query,profiles,config}
+    query               Run a Loki query_range request.
+    profiles            Inspect configured profiles.
+    config              Inspect and validate configuration.
+
+options:
+  -h, --help            show this help message and exit
+  --config CONFIG       Configuration file (default: XDG config path).
+
+$ loki-query query --help
+usage: loki-query query [-h] --profile PROFILE [--since SINCE | --start START]
+                        [--end END] [--limit LIMIT]
+                        [--output {human,raw,jsonl}] [--timeout TIMEOUT]
+                        logql
+
+positional arguments:
+  logql                 Complete LogQL query, or - to read stdin.
+
+options:
+  -h, --help            show this help message and exit
+  --profile PROFILE     Named target profile.
+  --since SINCE         Relative duration such as 15m or 2h.
+  --start START         RFC 3339 range start.
+  --end END             RFC 3339 range end (default: now).
+  --limit LIMIT
+  --output {human,raw,jsonl}
+  --timeout TIMEOUT
+
+$ loki-query config --help
+usage: loki-query config [-h] {path,validate} ...
+
+positional arguments:
+  {path,validate}
+    path           Print the default configuration path.
+    validate       Validate the configuration file.
+
+options:
+  -h, --help       show this help message and exit
+
+$ loki-query profiles --help
+usage: loki-query profiles [-h] {list} ...
+
+positional arguments:
+  {list}
+    list      List configured profile names.
+
+options:
+  -h, --help  show this help message and exit
