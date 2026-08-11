@@ -28,9 +28,10 @@ options:
   --since SINCE         Relative duration such as 15m or 2h.
   --start START         RFC 3339 range start.
   --end END             RFC 3339 range end (default: now).
-  --limit LIMIT
+  --limit LIMIT         Maximum log entries (1-5000; default: 100).
   --output {human,raw,jsonl}
-  --timeout TIMEOUT
+                        Output format (default: human).
+  --timeout TIMEOUT     HTTP timeout in seconds (default: 30).
 
 $ loki-query config --help
 usage: loki-query config [-h] {path,validate} ...
@@ -43,12 +44,30 @@ positional arguments:
 options:
   -h, --help       show this help message and exit
 
+$ loki-query config path --help
+usage: loki-query config path [-h]
+
+options:
+  -h, --help  show this help message and exit
+
+$ loki-query config validate --help
+usage: loki-query config validate [-h]
+
+options:
+  -h, --help  show this help message and exit
+
 $ loki-query profiles --help
 usage: loki-query profiles [-h] {list} ...
 
 positional arguments:
   {list}
     list      List configured profile names.
+
+options:
+  -h, --help  show this help message and exit
+
+$ loki-query profiles list --help
+usage: loki-query profiles list [-h]
 
 options:
   -h, --help  show this help message and exit

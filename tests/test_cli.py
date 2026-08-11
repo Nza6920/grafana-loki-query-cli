@@ -147,6 +147,20 @@ token = "must-not-be-stored-here"
 
 
 class QueryTests(unittest.TestCase):
+    def test_end_is_only_valid_with_absolute_start(self) -> None:
+        for extra_args in (("--end", "2026-08-11T00:00:00Z"), ("--since", "1h", "--end", "2026-08-11T00:00:00Z")):
+            with self.subTest(extra_args=extra_args):
+                result = run_cli(
+                    "query",
+                    "--profile",
+                    "prod",
+                    *extra_args,
+                    '{namespace="prod"}',
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("--end requires --start", result.stderr)
+
     def test_query_sends_expected_request_and_sorts_jsonl_across_streams(self) -> None:
         observed: dict[str, object] = {}
 

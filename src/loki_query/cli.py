@@ -31,18 +31,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     query_parser = subparsers.add_parser(
-        "query", help="Run a Loki query_range request."
+        "query",
+        help="Run a Loki query_range request.",
     )
     query_parser.add_argument("--profile", required=True, help="Named target profile.")
     range_group = query_parser.add_mutually_exclusive_group()
     range_group.add_argument("--since", help="Relative duration such as 15m or 2h.")
     range_group.add_argument("--start", help="RFC 3339 range start.")
     query_parser.add_argument("--end", help="RFC 3339 range end (default: now).")
-    query_parser.add_argument("--limit", type=_limit, default=100)
     query_parser.add_argument(
-        "--output", choices=("human", "raw", "jsonl"), default="human"
+        "--limit",
+        type=_limit,
+        default=100,
+        help="Maximum log entries (1-5000; default: 100).",
     )
-    query_parser.add_argument("--timeout", type=_positive_float, default=30.0)
+    query_parser.add_argument(
+        "--output",
+        choices=("human", "raw", "jsonl"),
+        default="human",
+        help="Output format (default: human).",
+    )
+    query_parser.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=30.0,
+        help="HTTP timeout in seconds (default: 30).",
+    )
     query_parser.add_argument("logql", help="Complete LogQL query, or - to read stdin.")
     profiles_parser = subparsers.add_parser(
         "profiles", help="Inspect configured profiles."
@@ -129,22 +143,26 @@ def _dispatch(
     opener: Opener,
     now: datetime,
 ) -> int:
+    config_path = (
+        Path(args.config).expanduser() if args.config else default_config_path()
+    )
     if args.command == "config" and args.config_command == "path":
-        print(
-            Path(args.config) if args.config else default_config_path(),
-            file=output_stream,
-        )
+        print(config_path, file=output_stream)
     elif args.command == "config" and args.config_command == "validate":
-        config = load_config(Path(args.config) if args.config else default_config_path())
+        config = load_config(config_path)
         count = len(config.profiles)
         noun = "profile" if count == 1 else "profiles"
         print(f"Configuration is valid ({count} {noun}).", file=output_stream)
     elif args.command == "profiles" and args.profiles_command == "list":
-        config = load_config(Path(args.config) if args.config else default_config_path())
+        config = load_config(config_path)
         for profile_name in sorted(config.profiles):
             print(profile_name, file=output_stream)
     elif args.command == "query":
-        config = load_config(Path(args.config) if args.config else default_config_path())
+        if args.end and not args.start:
+            raise ConfigurationError(
+                "--end requires --start and cannot be combined with --since."
+            )
+        config = load_config(config_path)
         profile = config.profiles.get(args.profile)
         if profile is None:
             raise ConfigurationError(f"Unknown profile: {args.profile!r}.")

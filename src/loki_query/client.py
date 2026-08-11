@@ -74,14 +74,16 @@ def query_range(
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
         method="GET",
     )
-    payload = _request_payload(
-        request=request,
-        timeout=timeout,
-        opener=opener,
-        sleeper=sleeper,
-    )
     try:
+        payload = _request_payload(
+            request=request,
+            timeout=timeout,
+            opener=opener,
+            sleeper=sleeper,
+        )
         return _entries_from_payload(payload)
+    except AuthenticationError as error:
+        raise AuthenticationError(str(error).replace(token, "[REDACTED]")) from error
     except QueryError as error:
         raise QueryError(str(error).replace(token, "[REDACTED]")) from error
 

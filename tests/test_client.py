@@ -7,6 +7,7 @@ import json
 import sys
 import unittest
 from urllib.error import HTTPError
+from urllib.error import URLError
 from urllib.request import Request
 
 
@@ -106,6 +107,26 @@ class RetryTests(unittest.TestCase):
             return Response(
                 b'{"status":"error","message":"secret-token is not allowed"}'
             )
+
+        with self.assertRaises(QueryError) as raised:
+            query_range(
+                profile=PROFILE,
+                token="secret-token",
+                query='{namespace="prod"}',
+                start_ns=1,
+                end_ns=2,
+                limit=1,
+                timeout=30,
+                opener=opener,
+                sleeper=lambda _: None,
+            )
+
+        self.assertIn("[REDACTED]", str(raised.exception))
+        self.assertNotIn("secret-token", str(raised.exception))
+
+    def test_transport_error_redacts_token_from_reason(self) -> None:
+        def opener(request: Request, timeout: float) -> Response:
+            raise URLError("proxy rejected secret-token")
 
         with self.assertRaises(QueryError) as raised:
             query_range(
