@@ -45,6 +45,11 @@ def load_config(path: Path) -> AppConfig:
         raise ConfigurationError(f"Configuration file not found: {path}") from error
     except tomllib.TOMLDecodeError as error:
         raise ConfigurationError(f"Invalid TOML in {path}: {error}") from error
+    except OSError as error:
+        detail = error.strerror or error.__class__.__name__
+        raise ConfigurationError(
+            f"Cannot read configuration file {path}: {detail}."
+        ) from error
 
     unsupported_top_level = sorted(set(document) - {"profiles"})
     if unsupported_top_level:
@@ -79,7 +84,12 @@ def _parse_profile(name: str, values: dict[str, Any]) -> Profile:
             raise ConfigurationError(f"Profile {name!r} requires non-empty {key!r}.")
         required[key] = value.strip()
 
-    grafana_url = urlsplit(required["grafana_url"])
+    try:
+        grafana_url = urlsplit(required["grafana_url"])
+    except ValueError as error:
+        raise ConfigurationError(
+            f"Profile {name!r} grafana_url must be an absolute HTTP(S) URL."
+        ) from error
     if grafana_url.scheme not in {"http", "https"} or not grafana_url.netloc:
         raise ConfigurationError(
             f"Profile {name!r} grafana_url must be an absolute HTTP(S) URL."

@@ -82,10 +82,9 @@ def query_range(
             sleeper=sleeper,
         )
         return _entries_from_payload(payload)
-    except AuthenticationError as error:
-        raise AuthenticationError(str(error).replace(token, "[REDACTED]")) from error
     except QueryError as error:
-        raise QueryError(str(error).replace(token, "[REDACTED]")) from error
+        error_type = AuthenticationError if isinstance(error, AuthenticationError) else QueryError
+        raise error_type(str(error).replace(token, "[REDACTED]")) from error
 
 
 def _request_payload(
@@ -110,7 +109,8 @@ def _request_payload(
             retry_after = error.headers.get("Retry-After")
             sleeper(_retry_delay(retry_after, attempt))
         except (URLError, TimeoutError) as error:
-            raise QueryError(f"Grafana request failed: {error.reason if isinstance(error, URLError) else 'timed out'}.") from error
+            reason = error.reason if isinstance(error, URLError) else "timed out"
+            raise QueryError(f"Grafana request failed: {reason}.") from error
     raise AssertionError("retry loop must return or raise")
 
 

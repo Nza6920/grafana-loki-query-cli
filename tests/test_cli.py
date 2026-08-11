@@ -145,10 +145,33 @@ token = "must-not-be-stored-here"
         self.assertIn("unsupported keys: token", result.stderr)
         self.assertNotIn("must-not-be-stored-here", result.stderr)
 
+    def test_config_reports_malformed_url_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                """
+[profiles.prod]
+grafana_url = "https://[invalid"
+datasource_uid = "loki"
+token_env = "GRAFANA_TOKEN"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            result = run_cli("--config", str(config_path), "config", "validate")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("absolute HTTP(S) URL", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
 
 class QueryTests(unittest.TestCase):
     def test_end_is_only_valid_with_absolute_start(self) -> None:
-        for extra_args in (("--end", "2026-08-11T00:00:00Z"), ("--since", "1h", "--end", "2026-08-11T00:00:00Z")):
+        invalid_modes = (
+            ("--end", "2026-08-11T00:00:00Z"),
+            ("--since", "1h", "--end", "2026-08-11T00:00:00Z"),
+        )
+        for extra_args in invalid_modes:
             with self.subTest(extra_args=extra_args):
                 result = run_cli(
                     "query",
