@@ -1,30 +1,32 @@
 # loki-query
 
-通过 Grafana datasource proxy 查询 Loki `query_range` API 的只读 CLI。调用者提供完整 LogQL；CLI 负责 profile、时间范围、鉴权、重试、跨 stream 排序和稳定输出。
+[中文文档](README.zh-CN.md)
 
-## 安装
+A read-only CLI for querying Loki's `query_range` API through a Grafana datasource proxy. Callers provide complete LogQL queries; the CLI handles profiles, time ranges, authentication, retries, cross-stream sorting, and stable output.
 
-需要 Python 3.11 或更高版本：
+## Installation
+
+Python 3.11 or later is required:
 
 ```bash
 pipx install .
 ```
 
-开发时可直接运行：
+For development, run it directly:
 
 ```bash
 PYTHONPATH=src python -m loki_query --help
 ```
 
-## 配置
+## Configuration
 
-复制 [`config.example.toml`](config.example.toml) 到：
+Copy [`config.example.toml`](config.example.toml) to:
 
 ```text
 ${XDG_CONFIG_HOME:-~/.config}/loki-query/config.toml
 ```
 
-每次查询必须显式指定 profile。profile 仅保存 Token 的环境变量名；不要把 Token 写入 TOML：
+Every query must explicitly select a profile. A profile stores only the name of the environment variable that contains the token; never put the token itself in the TOML file:
 
 ```toml
 [profiles.prod]
@@ -41,11 +43,11 @@ loki-query config validate
 loki-query profiles list
 ```
 
-用 `--config PATH` 临时选择其他配置文件；该全局参数应写在子命令之前。
+Use `--config PATH` to temporarily select another configuration file. This global option must appear before the subcommand.
 
-## 查询
+## Querying
 
-默认查询最近 15 分钟，最多返回 100 条，并按时间全局倒序输出：
+By default, a query searches the last 15 minutes, returns at most 100 entries, and outputs them in global reverse chronological order:
 
 ```bash
 loki-query query \
@@ -53,7 +55,7 @@ loki-query query \
   '{namespace="newchiwan-prod"} |= "/customConfig" |= "252143"'
 ```
 
-指定相对时间和 JSONL 输出：
+Specify a relative time range and JSONL output:
 
 ```bash
 loki-query query \
@@ -64,7 +66,7 @@ loki-query query \
   '{namespace="newchiwan-prod"} |= "252143"'
 ```
 
-指定绝对时间：
+Specify an absolute time range:
 
 ```bash
 loki-query query \
@@ -74,36 +76,36 @@ loki-query query \
   '{namespace="newchiwan-prod"} |= "252143"'
 ```
 
-从 stdin 读取完整 LogQL，避免复杂的 shell 引号：
+Read complete LogQL from stdin to avoid complicated shell quoting:
 
 ```bash
 printf '%s' '{namespace="newchiwan-prod"} |= "252143"' \
   | loki-query query --profile prod --output raw -
 ```
 
-输出模式：
+Output modes:
 
-- `human`：默认，本地时间和日志正文。
-- `raw`：仅日志正文，空结果不输出内容。
-- `jsonl`：每行包含 UTC 纳秒时间、全部 labels 和正文，空结果不输出内容。
+- `human`: the default; local timestamps and log lines.
+- `raw`: log lines only; an empty result produces no output.
+- `jsonl`: one line per entry containing a nanosecond UTC timestamp, all labels, and the log line; an empty result produces no output.
 
-成功但没有匹配日志时退出码为 `0`。配置或参数错误为 `2`，Token 缺失或认证失败为 `3`，其他 Grafana/Loki 查询失败为 `4`。
+A successful query with no matching logs exits with status `0`. Configuration or argument errors use `2`, a missing token or authentication failure uses `3`, and other Grafana/Loki query failures use `4`.
 
-CLI 只对 `429`、`502`、`503`、`504` 最多重试两次，并遵循 `Retry-After`。默认请求超时为 30 秒。Token 只从 profile 指定的环境变量读取，不进入命令行或配置文件。
+The CLI retries only `429`, `502`, `503`, and `504` responses, at most twice, and honors `Retry-After`. The default request timeout is 30 seconds. Tokens are read only from the environment variable named by the profile and never enter the command line or configuration file.
 
 ## Skill
 
-仓库内提供显式调用的 `$loki-query` skill：
+The repository provides an explicitly invoked `$loki-query` skill:
 
 ```text
-$loki-query 使用 prod profile 查询最近 30 分钟内订单 252143 的异常日志
+$loki-query use the prod profile to query error logs for order 252143 from the last 30 minutes
 ```
 
-它不会因普通的日志讨论自动触发。查询时最多迭代五次；切换 profile 或把时间窗扩大到一小时以上前会再次确认。
+Ordinary log discussions do not trigger it automatically. A query can be refined up to five times; confirmation is required before switching profiles or widening the time window beyond one hour.
 
-如需在其他仓库使用，将 `.agents/skills/loki-query` 安装或链接到相应仓库的 skills 目录，并确保 `loki-query` 命令已通过 `pipx` 安装。
+To use it in another repository, install or link `.agents/skills/loki-query` into that repository's skills directory and make sure the `loki-query` command has been installed with `pipx`.
 
-## 开发验证
+## Development checks
 
 ```bash
 python -m unittest discover -s tests -v
@@ -111,4 +113,4 @@ python -m compileall -q src tests
 python -m mypy src tests
 ```
 
-生产 smoke test 应使用临时配置、最近 15 分钟和 `limit=1`；验证报告只记录请求是否成功及结果条数，不复述日志正文。
+A production smoke test should use a temporary configuration, the last 15 minutes, and `limit=1`. Its report should record only whether the request succeeded and the number of results, without reproducing log content.
