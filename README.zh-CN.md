@@ -95,7 +95,8 @@ CLI 只对 `429`、`502`、`503`、`504` 最多重试两次，并遵循 `Retry-A
 
 ## Skill
 
-仓库内提供显式调用的 `$loki-query` skill：
+仓库内显式调用的 `$loki-query` skill 位于
+[`.agents/skills/loki-query/SKILL.md`](.agents/skills/loki-query/SKILL.md)：
 
 ```text
 $loki-query 使用 prod profile 查询最近 30 分钟内订单 252143 的异常日志

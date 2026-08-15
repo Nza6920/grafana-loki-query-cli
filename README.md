@@ -95,7 +95,8 @@ The CLI retries only `429`, `502`, `503`, and `504` responses, at most twice, an
 
 ## Skill
 
-The repository provides an explicitly invoked `$loki-query` skill:
+The repository provides an explicitly invoked `$loki-query` skill at
+[`.agents/skills/loki-query/SKILL.md`](.agents/skills/loki-query/SKILL.md):
 
 ```text
 $loki-query use the prod profile to query error logs for order 252143 from the last 30 minutes
