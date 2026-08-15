@@ -101,7 +101,17 @@ The repository provides an explicitly invoked `$loki-query` skill:
 $loki-query use the prod profile to query error logs for order 252143 from the last 30 minutes
 ```
 
-Ordinary log discussions do not trigger it automatically. A query can be refined up to five times; confirmation is required before switching profiles or widening the time window beyond one hour.
+Ordinary log discussions do not trigger it automatically.
+
+The skill requires every request to name exactly one profile and uses the
+profile's `default_selector` unless the user provides another reliable
+selector. It defaults to the last 15 minutes, 100 entries, and JSONL output.
+Each CLI query is limited to a 24-hour window. A window beyond one hour must
+be explicitly approved in the current request, as must switching profiles.
+The five-query limit applies to all CLI queries in one user request, including
+the initial query. Results distinguish matching log evidence, inferences, and
+unresolved checks while omitting irrelevant production content and
+credentials.
 
 To use it in another repository, install or link `.agents/skills/loki-query` into that repository's skills directory and make sure the `loki-query` command has been installed with `pipx`.
 
