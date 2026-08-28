@@ -20,11 +20,13 @@ PYTHONPATH=src python -m loki_query --help
 
 ## Configuration
 
-Copy [`config.example.toml`](config.example.toml) to:
+On Linux and macOS, copy [`config.example.toml`](config.example.toml) to:
 
 ```text
 ${XDG_CONFIG_HOME:-~/.config}/loki-query/config.toml
 ```
+
+On Windows, the default path is `%APPDATA%\loki-query\config.toml`.
 
 Every query must explicitly select a profile. A profile stores only the name of the environment variable that contains the token; never put the token itself in the TOML file:
 
@@ -36,6 +38,8 @@ token_env = "GRAFANA_TOKEN"
 default_selector = '{namespace="newchiwan-prod"}'
 ```
 
+Bash:
+
 ```bash
 export GRAFANA_TOKEN='...'
 loki-query config path
@@ -43,7 +47,27 @@ loki-query config validate
 loki-query profiles list
 ```
 
-Use `--config PATH` to temporarily select another configuration file. This global option must appear before the subcommand.
+PowerShell:
+
+```powershell
+$configPath = Join-Path $env:APPDATA 'loki-query\config.toml'
+New-Item -ItemType Directory -Force (Split-Path $configPath) | Out-Null
+Copy-Item .\config.example.toml $configPath
+$env:GRAFANA_TOKEN = '...'
+loki-query config path
+loki-query config validate
+loki-query profiles list
+```
+
+Configuration lookup order is `--config`, `LOKI_QUERY_CONFIG`,
+`XDG_CONFIG_HOME/loki-query/config.toml`, then the platform default above. If
+`APPDATA` is unavailable on Windows, the fallback is
+`%USERPROFILE%\AppData\Roaming\loki-query\config.toml`. The legacy Windows path
+`%USERPROFILE%\.config\loki-query\config.toml` is not searched automatically;
+move the file or select it with `LOKI_QUERY_CONFIG`, `XDG_CONFIG_HOME`, or
+`--config`. The global `--config` option must appear before the subcommand.
+TOML must be UTF-8; when using Windows PowerShell 5.1, preserve the example
+file's encoding or use an editor that saves UTF-8.
 
 ## Querying
 
@@ -81,6 +105,12 @@ Read complete LogQL from stdin to avoid complicated shell quoting:
 ```bash
 printf '%s' '{namespace="newchiwan-prod"} |= "252143"' \
   | loki-query query --profile prod --output raw -
+```
+
+The equivalent PowerShell pipeline is:
+
+```powershell
+'{namespace="newchiwan-prod"} |= "252143"' | loki-query query --profile prod --output raw -
 ```
 
 Output modes:

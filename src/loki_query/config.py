@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import os
 from pathlib import Path
 import re
+import sys
 import tomllib
 from dataclasses import dataclass
 from typing import Any
@@ -31,9 +33,23 @@ _PROFILE_KEYS = {"grafana_url", "datasource_uid", "token_env", "default_selector
 _ENVIRONMENT_VARIABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def default_config_path() -> Path:
-    config_home = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(config_home).expanduser() if config_home else Path.home() / ".config"
+def default_config_path(
+    *,
+    environ: Mapping[str, str] | None = None,
+    platform: str | None = None,
+    home: Path | None = None,
+) -> Path:
+    environment = environ if environ is not None else os.environ
+    if config_path := environment.get("LOKI_QUERY_CONFIG"):
+        return Path(config_path).expanduser()
+    if config_home := environment.get("XDG_CONFIG_HOME"):
+        return Path(config_home).expanduser() / "loki-query" / "config.toml"
+    user_home = home if home is not None else Path.home()
+    if (platform if platform is not None else sys.platform) == "win32":
+        appdata = environment.get("APPDATA")
+        base = Path(appdata).expanduser() if appdata else user_home / "AppData" / "Roaming"
+    else:
+        base = user_home / ".config"
     return base / "loki-query" / "config.toml"
 
 

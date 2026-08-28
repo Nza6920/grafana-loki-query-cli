@@ -11,7 +11,8 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
-  --config CONFIG       Configuration file (default: XDG config path).
+  --config CONFIG       Configuration file (default: environment or platform
+                        config path).
 
 $ loki-query query --help
 usage: loki-query query [-h] --profile PROFILE [--since SINCE | --start START]

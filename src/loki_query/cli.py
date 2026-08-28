@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=str,
-        help="Configuration file (default: XDG config path).",
+        help="Configuration file (default: environment or platform config path).",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     query_parser = subparsers.add_parser(
@@ -143,18 +143,20 @@ def _dispatch(
     opener: Opener,
     now: datetime,
 ) -> int:
-    config_path = (
-        Path(args.config).expanduser() if args.config else default_config_path()
+    selected_config_path = (
+        Path(args.config).expanduser()
+        if args.config
+        else default_config_path(environ=environment)
     )
     if args.command == "config" and args.config_command == "path":
-        print(config_path, file=output_stream)
+        print(selected_config_path, file=output_stream)
     elif args.command == "config" and args.config_command == "validate":
-        config = load_config(config_path)
+        config = load_config(selected_config_path)
         count = len(config.profiles)
         noun = "profile" if count == 1 else "profiles"
         print(f"Configuration is valid ({count} {noun}).", file=output_stream)
     elif args.command == "profiles" and args.profiles_command == "list":
-        config = load_config(config_path)
+        config = load_config(selected_config_path)
         for profile_name in sorted(config.profiles):
             print(profile_name, file=output_stream)
     elif args.command == "query":
@@ -162,7 +164,7 @@ def _dispatch(
             raise ConfigurationError(
                 "--end requires --start and cannot be combined with --since."
             )
-        config = load_config(config_path)
+        config = load_config(selected_config_path)
         profile = config.profiles.get(args.profile)
         if profile is None:
             raise ConfigurationError(f"Unknown profile: {args.profile!r}.")

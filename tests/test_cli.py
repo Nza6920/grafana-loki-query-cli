@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from loki_query.cli import main  # noqa: E402
+from loki_query.config import default_config_path  # noqa: E402
 
 
 def run_cli(
@@ -63,6 +64,52 @@ class CliHelpTests(unittest.TestCase):
         self.assertEqual(
             result.stdout.strip(),
             "/tmp/loki-query-test-config/loki-query/config.toml",
+        )
+
+    def test_config_path_honors_loki_query_config_before_xdg(self) -> None:
+        result = run_cli(
+            "config",
+            "path",
+            env={
+                "LOKI_QUERY_CONFIG": "/tmp/loki-query-explicit.toml",
+                "XDG_CONFIG_HOME": "/tmp/loki-query-test-config",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "/tmp/loki-query-explicit.toml")
+
+    def test_default_config_path_uses_appdata_on_windows(self) -> None:
+        self.assertEqual(
+            default_config_path(
+                environ={"APPDATA": "C:/Users/example/AppData/Roaming"},
+                platform="win32",
+                home=Path("C:/Users/example"),
+            ),
+            Path("C:/Users/example/AppData/Roaming/loki-query/config.toml"),
+        )
+
+    def test_windows_falls_back_to_roaming_directory_under_home(self) -> None:
+        self.assertEqual(
+            default_config_path(
+                environ={},
+                platform="win32",
+                home=Path("C:/Users/example"),
+            ),
+            Path("C:/Users/example/AppData/Roaming/loki-query/config.toml"),
+        )
+
+    def test_xdg_config_home_overrides_appdata_on_windows(self) -> None:
+        self.assertEqual(
+            default_config_path(
+                environ={
+                    "XDG_CONFIG_HOME": "/config/from-xdg",
+                    "APPDATA": "C:/Users/example/AppData/Roaming",
+                },
+                platform="win32",
+                home=Path("C:/Users/example"),
+            ),
+            Path("/config/from-xdg/loki-query/config.toml"),
         )
 
     def test_profiles_list_reads_named_profiles(self) -> None:

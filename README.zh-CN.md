@@ -20,11 +20,13 @@ PYTHONPATH=src python -m loki_query --help
 
 ## 配置
 
-复制 [`config.example.toml`](config.example.toml) 到：
+在 Linux 和 macOS 上，将 [`config.example.toml`](config.example.toml) 复制到：
 
 ```text
 ${XDG_CONFIG_HOME:-~/.config}/loki-query/config.toml
 ```
+
+Windows 默认位置为 `%APPDATA%\loki-query\config.toml`。
 
 每次查询必须显式指定 profile。profile 仅保存 Token 的环境变量名；不要把 Token 写入 TOML：
 
@@ -36,6 +38,8 @@ token_env = "GRAFANA_TOKEN"
 default_selector = '{namespace="newchiwan-prod"}'
 ```
 
+Bash：
+
 ```bash
 export GRAFANA_TOKEN='...'
 loki-query config path
@@ -43,7 +47,25 @@ loki-query config validate
 loki-query profiles list
 ```
 
-用 `--config PATH` 临时选择其他配置文件；该全局参数应写在子命令之前。
+PowerShell：
+
+```powershell
+$configPath = Join-Path $env:APPDATA 'loki-query\config.toml'
+New-Item -ItemType Directory -Force (Split-Path $configPath) | Out-Null
+Copy-Item .\config.example.toml $configPath
+$env:GRAFANA_TOKEN = '...'
+loki-query config path
+loki-query config validate
+loki-query profiles list
+```
+
+配置查找顺序为 `--config`、`LOKI_QUERY_CONFIG`、
+`XDG_CONFIG_HOME/loki-query/config.toml`，最后是上述平台默认位置。Windows 缺少
+`APPDATA` 时回退到 `%USERPROFILE%\AppData\Roaming\loki-query\config.toml`。不会
+自动查找旧的 Windows 路径 `%USERPROFILE%\.config\loki-query\config.toml`；请移动
+文件，或通过 `LOKI_QUERY_CONFIG`、`XDG_CONFIG_HOME`、`--config` 显式选择。
+全局参数 `--config` 应写在子命令之前。TOML 必须使用 UTF-8；使用 Windows
+PowerShell 5.1 时，请保留示例文件编码，或使用可将文件保存为 UTF-8 的编辑器。
 
 ## 查询
 
@@ -81,6 +103,12 @@ loki-query query \
 ```bash
 printf '%s' '{namespace="newchiwan-prod"} |= "252143"' \
   | loki-query query --profile prod --output raw -
+```
+
+对应的 PowerShell pipeline 为：
+
+```powershell
+'{namespace="newchiwan-prod"} |= "252143"' | loki-query query --profile prod --output raw -
 ```
 
 输出模式：
