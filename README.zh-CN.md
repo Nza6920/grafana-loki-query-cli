@@ -2,17 +2,17 @@
 
 [English](README.md)
 
-通过 Grafana datasource proxy 查询 Loki `query_range` API 的只读 CLI。调用者提供完整 LogQL；CLI 负责 profile、时间范围、鉴权、重试、跨 stream 排序和稳定输出。
+通过 Grafana datasource proxy 查询 Loki `query_range` API 的只读 CLI。调用者提供完整 LogQL；CLI 负责 profile、时间范围、鉴权、重试、跨 stream 排序和稳定输出。0.1.1 版本增加 Windows 原生配置路径和 PowerShell 指引。
 
 ## 安装
 
-需要 Python 3.11 或更高版本：
+需要 Python 3.11 或更高版本。使用 pipx 安装固定的 GitHub release：
 
 ```bash
-pipx install .
+pipx install "git+https://github.com/Nza6920/grafana-loki-query-cli.git@v0.1.1"
 ```
 
-开发时可直接运行：
+开发中的本地 checkout 可使用 `pipx install --force .`，或直接运行：
 
 ```bash
 PYTHONPATH=src python -m loki_query --help
