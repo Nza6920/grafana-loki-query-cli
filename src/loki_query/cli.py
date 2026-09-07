@@ -7,7 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 import os
 from pathlib import Path
 import sys
-from typing import Any, TextIO
+from typing import Any, NoReturn, Protocol, TextIO
 
 from .client import AuthenticationError, Opener, QueryError, default_opener, query_range
 from .config import ConfigurationError, default_config_path, load_config
@@ -20,30 +20,62 @@ EXIT_AUTH = 3
 EXIT_QUERY = 4
 
 
-class _InstalledVersionAction(argparse.Action):
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: str | Sequence[Any] | None,
-        option_string: str | None = None,
-    ) -> None:
-        try:
-            installed_version = version("loki-query")
-        except PackageNotFoundError:
-            parser.error("distribution metadata is unavailable; install loki-query")
-        print(f"{parser.prog} {installed_version}")
-        parser.exit()
+class _ParserExit(Exception):
+    """An expected parser outcome, converted to a return code by main."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(status)
+        self.status = status
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+class _TextWriter(Protocol):
+    def write(self, text: str, /) -> object: ...
+
+
+def build_parser(
+    *, stdout: TextIO | None = None, stderr: TextIO | None = None
+) -> argparse.ArgumentParser:
+    output_stream = stdout if stdout is not None else sys.stdout
+    error_stream = stderr if stderr is not None else sys.stderr
+
+    class InstalledVersionAction(argparse.Action):
+        def __call__(
+            self,
+            parser: argparse.ArgumentParser,
+            namespace: argparse.Namespace,
+            values: str | Sequence[Any] | None,
+            option_string: str | None = None,
+        ) -> None:
+            try:
+                installed_version = version("loki-query")
+            except PackageNotFoundError:
+                parser.error("distribution metadata is unavailable; install loki-query")
+            print(f"{parser.prog} {installed_version}", file=output_stream)
+            parser.exit()
+
+    class InvocationParser(argparse.ArgumentParser):
+        def print_help(self, file: _TextWriter | None = None) -> None:
+            super().print_help(output_stream if file is None else file)
+
+        def print_usage(self, file: _TextWriter | None = None) -> None:
+            super().print_usage(output_stream if file is None else file)
+
+        def error(self, message: str) -> NoReturn:
+            self.print_usage(error_stream)
+            self.exit(2, f"{self.prog}: error: {message}\n")
+
+        def exit(self, status: int = 0, message: str | None = None) -> NoReturn:
+            if message:
+                error_stream.write(message)
+            raise _ParserExit(status)
+
+    parser = InvocationParser(
         prog="loki-query",
         description="Query Loki logs through a Grafana datasource proxy.",
     )
     parser.add_argument(
         "--version",
-        action=_InstalledVersionAction,
+        action=InstalledVersionAction,
         nargs=0,
         help="show program's version number and exit",
     )
@@ -52,7 +84,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         help="Configuration file (default: environment or platform config path).",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(
+        dest="command", required=True, parser_class=InvocationParser
+    )
     query_parser = subparsers.add_parser(
         "query",
         help="Run a Loki query_range request.",
@@ -85,14 +119,14 @@ def build_parser() -> argparse.ArgumentParser:
         "profiles", help="Inspect configured profiles."
     )
     profiles_subparsers = profiles_parser.add_subparsers(
-        dest="profiles_command", required=True
+        dest="profiles_command", required=True, parser_class=InvocationParser
     )
     profiles_subparsers.add_parser("list", help="List configured profile names.")
     config_parser = subparsers.add_parser(
         "config", help="Inspect and validate configuration."
     )
     config_subparsers = config_parser.add_subparsers(
-        dest="config_command", required=True
+        dest="config_command", required=True, parser_class=InvocationParser
     )
     config_subparsers.add_parser("path", help="Print the default configuration path.")
     config_subparsers.add_parser("validate", help="Validate the configuration file.")
@@ -129,12 +163,20 @@ def main(
     opener: Opener = default_opener,
     now: datetime | None = None,
 ) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    """Write command output to the supplied streams and return its exit code.
+
+    Help, version, and expected input failures return normally. Unexpected
+    execution failures propagate to the caller.
+    """
     environment = environ if environ is not None else os.environ
     input_stream = stdin if stdin is not None else sys.stdin
     output_stream = stdout if stdout is not None else sys.stdout
     error_stream = stderr if stderr is not None else sys.stderr
+    parser = build_parser(stdout=output_stream, stderr=error_stream)
+    try:
+        args = parser.parse_args(argv)
+    except _ParserExit as outcome:
+        return outcome.status
     try:
         return _dispatch(
             args,

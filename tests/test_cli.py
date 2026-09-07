@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from io import BytesIO, StringIO
@@ -60,6 +60,52 @@ def run_cli(
 
 
 class CliHelpTests(unittest.TestCase):
+    def test_help_returns_success_and_uses_only_injected_stdout(self) -> None:
+        stdout, stderr = StringIO(), StringIO()
+        ambient_stdout, ambient_stderr = StringIO(), StringIO()
+        with redirect_stdout(ambient_stdout), redirect_stderr(ambient_stderr):
+            result = main(["--help"], stdout=stdout, stderr=stderr, environ={})
+
+        self.assertEqual(result, 0)
+        self.assertIn("usage: loki-query", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(ambient_stdout.getvalue(), "")
+        self.assertEqual(ambient_stderr.getvalue(), "")
+
+    def test_version_returns_success_and_uses_injected_stdout(self) -> None:
+        stdout, stderr, ambient_stdout = StringIO(), StringIO(), StringIO()
+        with patch("loki_query.cli.version", return_value="0.1.2"), redirect_stdout(ambient_stdout):
+            result = main(["--version"], stdout=stdout, stderr=stderr, environ={})
+
+        self.assertEqual(result, 0)
+        self.assertEqual(stdout.getvalue(), "loki-query 0.1.2\n")
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(ambient_stdout.getvalue(), "")
+
+    def test_nested_help_and_parser_errors_use_injected_streams(self) -> None:
+        cases: tuple[tuple[list[str], int, str], ...] = (
+            (["query", "--help"], 0, "usage: loki-query query"),
+            (["profiles", "list", "--help"], 0, "usage: loki-query profiles list"),
+            (["config", "validate", "--help"], 0, "usage: loki-query config validate"),
+            ([], 2, "the following arguments are required: command"),
+            (["unknown"], 2, "invalid choice: 'unknown'"),
+            (["query"], 2, "the following arguments are required: --profile, logql"),
+            (["query", "--profile", "test", "--limit", "0", "{}"], 2, "limit must be between 1 and 5000"),
+            (["config", "validate", "--unknown"], 2, "unrecognized arguments: --unknown"),
+        )
+        for argv, expected_code, message in cases:
+            with self.subTest(argv=argv):
+                stdout, stderr = StringIO(), StringIO()
+                ambient_stdout, ambient_stderr = StringIO(), StringIO()
+                with redirect_stdout(ambient_stdout), redirect_stderr(ambient_stderr):
+                    result = main(argv, stdout=stdout, stderr=stderr, environ={})
+                self.assertEqual(result, expected_code)
+                destination, other = (stdout, stderr) if expected_code == 0 else (stderr, stdout)
+                self.assertIn(message, destination.getvalue())
+                self.assertEqual(other.getvalue(), "")
+                self.assertEqual(ambient_stdout.getvalue(), "")
+                self.assertEqual(ambient_stderr.getvalue(), "")
+
     def test_version_reports_installed_distribution_without_loading_config(self) -> None:
         result = run_cli("--version", distribution_version="0.1.2")
 
@@ -72,10 +118,10 @@ class CliHelpTests(unittest.TestCase):
         with patch(
             "loki_query.cli.version",
             side_effect=PackageNotFoundError("loki-query"),
-        ), redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
-            main(["--version"])
+        ):
+            result = main(["--version"], stderr=stderr)
 
-        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(result, 2)
         self.assertIn("install loki-query", stderr.getvalue())
 
     def test_help_describes_public_commands(self) -> None:
@@ -258,6 +304,58 @@ token_env = "GRAFANA_TOKEN"
 
 
 class QueryTests(unittest.TestCase):
+    def test_expected_query_failures_return_codes_through_injected_stderr(self) -> None:
+        def opener(request: Request, timeout: float) -> BytesIO:
+            return BytesIO(b'{"status":"error","message":"query rejected"}')
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                '[profiles.test]\ngrafana_url = "https://example.invalid"\n'
+                'datasource_uid = "loki"\ntoken_env = "TEST_TOKEN"\n',
+                encoding="utf-8",
+            )
+            cases: tuple[tuple[str, dict[str, str], int, str], ...] = (
+                ("missing", {"TEST_TOKEN": "token"}, 2, "Unknown profile"),
+                ("test", {}, 3, "token environment variable 'TEST_TOKEN' is not set"),
+                ("test", {"TEST_TOKEN": "token"}, 4, "query rejected"),
+            )
+            for profile, environment, code, message in cases:
+                with self.subTest(code=code):
+                    stdout, stderr = StringIO(), StringIO()
+                    result = main(
+                        ["--config", str(config_path), "query", "--profile", profile, "{}"],
+                        environ=environment, stdout=stdout, stderr=stderr, opener=opener,
+                    )
+                    self.assertEqual(result, code)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertIn(message, stderr.getvalue())
+                    self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_unexpected_exceptions_propagate_from_query_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                '[profiles.test]\ngrafana_url = "https://example.invalid"\n'
+                'datasource_uid = "loki"\ntoken_env = "TEST_TOKEN"\n',
+                encoding="utf-8",
+            )
+            for failure in (RuntimeError("unexpected defect"), SystemExit(7)):
+                with self.subTest(failure=type(failure).__name__):
+                    def opener(request: Request, timeout: float) -> BytesIO:
+                        raise failure
+
+                    stdout, stderr = StringIO(), StringIO()
+                    with self.assertRaises(type(failure)) as raised:
+                        main(
+                            ["--config", str(config_path), "query", "--profile", "test", "{}"],
+                            environ={"TEST_TOKEN": "token"}, stdout=stdout,
+                            stderr=stderr, opener=opener,
+                        )
+                    self.assertIs(raised.exception, failure)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertEqual(stderr.getvalue(), "")
+
     def test_end_is_only_valid_with_absolute_start(self) -> None:
         invalid_modes = (
             ("--end", "2026-08-11T00:00:00Z"),
