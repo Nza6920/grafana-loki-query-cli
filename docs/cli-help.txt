@@ -1,5 +1,6 @@
 $ loki-query --help
-usage: loki-query [-h] [--config CONFIG] {query,profiles,config} ...
+usage: loki-query [-h] [--version] [--config CONFIG]
+                  {query,profiles,config} ...
 
 Query Loki logs through a Grafana datasource proxy.
 
@@ -11,6 +12,7 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
+  --version             show program's version number and exit
   --config CONFIG       Configuration file (default: environment or platform
                         config path).
 

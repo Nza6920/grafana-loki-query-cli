@@ -2,14 +2,15 @@
 
 [中文文档](README.zh-CN.md)
 
-A read-only CLI for querying Loki's `query_range` API through a Grafana datasource proxy. Callers provide complete LogQL queries; the CLI handles profiles, time ranges, authentication, retries, cross-stream sorting, and stable output. Version 0.1.1 adds native Windows configuration paths and PowerShell guidance.
+A read-only CLI for querying Loki's `query_range` API through a Grafana datasource proxy. Callers provide complete LogQL queries; the CLI handles profiles, time ranges, authentication, retries, cross-stream sorting, and stable output. Version 0.1.2 adds `--version`; version 0.1.1 added native Windows configuration paths and PowerShell guidance.
 
 ## Installation
 
 Python 3.11 or later is required. Install the fixed GitHub release with pipx:
 
 ```bash
-pipx install "git+https://github.com/Nza6920/grafana-loki-query-cli.git@v0.1.1"
+pipx install "git+https://github.com/Nza6920/grafana-loki-query-cli.git@v0.1.2"
+loki-query --version
 ```
 
 For a local checkout under development, use `pipx install --force .` or run it
@@ -18,6 +19,9 @@ directly:
 ```bash
 PYTHONPATH=src python -m loki_query --help
 ```
+
+Direct source execution supports ordinary commands such as `--help`; install the
+project before using `--version`, which reports installed distribution metadata.
 
 ## Configuration
 
@@ -149,10 +153,20 @@ To use it in another repository, install or link `.agents/skills/loki-query` int
 
 ## Development checks
 
+Use Python 3.11+ and install the development dependencies in a virtual environment:
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
 python -m unittest discover -s tests -v
 python -m compileall -q src tests
-python -m mypy src tests
+python -m mypy
 ```
+
+On Windows PowerShell, activate the environment with `.venv\Scripts\Activate.ps1`.
+Mypy strictly checks `src` and `tests` using the pinned version and configuration
+in `pyproject.toml`. GitHub Actions runs the same check on pushes and pull requests
+using Python 3.11.
 
 A production smoke test should use a temporary configuration, the last 15 minutes, and `limit=1`. Its report should record only whether the request succeeded and the number of results, without reproducing log content.

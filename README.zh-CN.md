@@ -2,14 +2,15 @@
 
 [English](README.md)
 
-通过 Grafana datasource proxy 查询 Loki `query_range` API 的只读 CLI。调用者提供完整 LogQL；CLI 负责 profile、时间范围、鉴权、重试、跨 stream 排序和稳定输出。0.1.1 版本增加 Windows 原生配置路径和 PowerShell 指引。
+通过 Grafana datasource proxy 查询 Loki `query_range` API 的只读 CLI。调用者提供完整 LogQL；CLI 负责 profile、时间范围、鉴权、重试、跨 stream 排序和稳定输出。0.1.2 版本增加 `--version`；0.1.1 版本增加了 Windows 原生配置路径和 PowerShell 指引。
 
 ## 安装
 
 需要 Python 3.11 或更高版本。使用 pipx 安装固定的 GitHub release：
 
 ```bash
-pipx install "git+https://github.com/Nza6920/grafana-loki-query-cli.git@v0.1.1"
+pipx install "git+https://github.com/Nza6920/grafana-loki-query-cli.git@v0.1.2"
+loki-query --version
 ```
 
 开发中的本地 checkout 可使用 `pipx install --force .`，或直接运行：
@@ -17,6 +18,9 @@ pipx install "git+https://github.com/Nza6920/grafana-loki-query-cli.git@v0.1.1"
 ```bash
 PYTHONPATH=src python -m loki_query --help
 ```
+
+直接从源码运行时可使用 `--help` 等普通命令；`--version` 报告已安装发行版的
+元数据，因此使用前需要先安装项目。
 
 ## 配置
 
@@ -138,10 +142,19 @@ $loki-query 使用 prod profile 查询最近 30 分钟内订单 252143 的异常
 
 ## 开发验证
 
+使用 Python 3.11+，在虚拟环境中安装开发依赖：
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
 python -m unittest discover -s tests -v
 python -m compileall -q src tests
-python -m mypy src tests
+python -m mypy
 ```
+
+Windows PowerShell 使用 `.venv\Scripts\Activate.ps1` 激活虚拟环境。Mypy 使用
+`pyproject.toml` 中固定的版本和配置严格检查 `src` 与 `tests`。GitHub Actions
+在推送和 pull request 时使用 Python 3.11 运行同一检查。
 
 生产 smoke test 应使用临时配置、最近 15 分钟和 `limit=1`；验证报告只记录请求是否成功及结果条数，不复述日志正文。

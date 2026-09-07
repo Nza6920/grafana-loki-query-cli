@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from contextlib import redirect_stderr
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from io import BytesIO, StringIO
 import json
@@ -9,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request
@@ -26,6 +29,7 @@ def run_cli(
     *args: str,
     input_text: str | None = None,
     env: dict[str, str] | None = None,
+    distribution_version: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     source_path = str(ROOT / "src")
@@ -33,18 +37,47 @@ def run_cli(
         part for part in (source_path, environment.get("PYTHONPATH", "")) if part
     )
     environment.update(env or {})
-    return subprocess.run(
-        [sys.executable, "-m", "loki_query", *args],
-        cwd=ROOT,
-        env=environment,
-        input=input_text,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    with tempfile.TemporaryDirectory() as directory:
+        if distribution_version is not None:
+            metadata_dir = Path(directory) / "loki_query.dist-info"
+            metadata_dir.mkdir()
+            (metadata_dir / "METADATA").write_text(
+                f"Metadata-Version: 2.1\nName: loki-query\nVersion: {distribution_version}\n",
+                encoding="utf-8",
+            )
+            environment["PYTHONPATH"] = os.pathsep.join(
+                (directory, environment["PYTHONPATH"])
+            )
+        return subprocess.run(
+            [sys.executable, "-m", "loki_query", *args],
+            cwd=ROOT,
+            env=environment,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
 
 class CliHelpTests(unittest.TestCase):
+    def test_version_reports_installed_distribution_without_loading_config(self) -> None:
+        result = run_cli("--version", distribution_version="0.1.2")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "loki-query 0.1.2")
+        self.assertEqual(result.stderr, "")
+
+    def test_version_reports_actionable_error_without_distribution_metadata(self) -> None:
+        stderr = StringIO()
+        with patch(
+            "loki_query.cli.version",
+            side_effect=PackageNotFoundError("loki-query"),
+        ), redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            main(["--version"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("install loki-query", stderr.getvalue())
+
     def test_help_describes_public_commands(self) -> None:
         result = run_cli("--help")
 
@@ -52,6 +85,7 @@ class CliHelpTests(unittest.TestCase):
         self.assertIn("query", result.stdout)
         self.assertIn("profiles", result.stdout)
         self.assertIn("config", result.stdout)
+        self.assertIn("--version", result.stdout)
 
     def test_config_path_honors_xdg_config_home(self) -> None:
         result = run_cli(

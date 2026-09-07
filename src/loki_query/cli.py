@@ -3,10 +3,11 @@ from __future__ import annotations
 import argparse
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError, version
 import os
 from pathlib import Path
 import sys
-from typing import TextIO
+from typing import Any, TextIO
 
 from .client import AuthenticationError, Opener, QueryError, default_opener, query_range
 from .config import ConfigurationError, default_config_path, load_config
@@ -19,10 +20,32 @@ EXIT_AUTH = 3
 EXIT_QUERY = 4
 
 
+class _InstalledVersionAction(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[Any] | None,
+        option_string: str | None = None,
+    ) -> None:
+        try:
+            installed_version = version("loki-query")
+        except PackageNotFoundError:
+            parser.error("distribution metadata is unavailable; install loki-query")
+        print(f"{parser.prog} {installed_version}")
+        parser.exit()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="loki-query",
         description="Query Loki logs through a Grafana datasource proxy.",
+    )
+    parser.add_argument(
+        "--version",
+        action=_InstalledVersionAction,
+        nargs=0,
+        help="show program's version number and exit",
     )
     parser.add_argument(
         "--config",
