@@ -11,10 +11,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from loki_query.client import LogEntry, MetricSample, QueryResult  # noqa: E402
-from loki_query.output import write_result  # noqa: E402
+from loki_query.output import format_timestamp_utc, write_result  # noqa: E402
 
 
 class OutputTests(unittest.TestCase):
+    def test_rfc3339_timestamp_zero_pads_early_years(self) -> None:
+        year_one_ns = -62_135_596_800 * 1_000_000_000
+
+        self.assertEqual(
+            format_timestamp_utc(year_one_ns), "0001-01-01T00:00:00.000000000Z"
+        )
+
     def test_raw_outputs_only_log_lines(self) -> None:
         output = StringIO()
         write_result(

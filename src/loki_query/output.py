@@ -9,7 +9,11 @@ from .client import LogEntry, MetricSample, QueryResult
 
 def format_timestamp_utc(timestamp_ns: int) -> str:
     seconds, nanoseconds = divmod(timestamp_ns, 1_000_000_000)
-    base = datetime.fromtimestamp(seconds, UTC).strftime("%Y-%m-%dT%H:%M:%S")
+    instant = datetime.fromtimestamp(seconds, UTC)
+    base = (
+        f"{instant.year:04d}-{instant.month:02d}-{instant.day:02d}T"
+        f"{instant.hour:02d}:{instant.minute:02d}:{instant.second:02d}"
+    )
     return f"{base}.{nanoseconds:09d}Z"
 
 
