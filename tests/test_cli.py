@@ -814,12 +814,6 @@ default_selector = '{{namespace="prod"}}'
                     self.assertNotIn("hidden", stderr.getvalue())
 
     def test_wholly_malformed_success_has_empty_stdout_and_query_error(self) -> None:
-        def opener(request: Request, timeout: float) -> BytesIO:
-            return BytesIO(
-                b'{"status":"success","data":{"resultType":"matrix",'
-                b'"result":[{"metric":{"SECRET_LABEL":"hidden"},"values":"bad"}]}}'
-            )
-
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.toml"
             config_path.write_text(
@@ -827,30 +821,64 @@ default_selector = '{{namespace="prod"}}'
                 'datasource_uid = "loki"\ntoken_env = "TEST_GRAFANA_TOKEN"\n',
                 encoding="utf-8",
             )
-            stdout, stderr = StringIO(), StringIO()
-            returncode = main(
-                [
-                    "--config",
-                    str(config_path),
-                    "query",
-                    "--profile",
-                    "prod",
-                    "--query-type",
+            cases = (
+                (
                     "metric",
-                    "{}",
-                ],
-                environ={"TEST_GRAFANA_TOKEN": "token"},
-                stdout=stdout,
-                stderr=stderr,
-                opener=opener,
+                    "matrix",
+                    [{"metric": {"SECRET_LABEL": "hidden"}, "values": "bad"}],
+                ),
+                (
+                    "log",
+                    "streams",
+                    [{"stream": {"SECRET_LABEL": "hidden"}, "values": "bad"}],
+                ),
+                ("metric", "matrix", {"SECRET_VALUE": "hidden"}),
+                ("log", "streams", {"SECRET_VALUE": "hidden"}),
+                (
+                    "metric",
+                    "matrix",
+                    [{"metric": {}, "values": [[1e100, "SECRET_VALUE"]]}],
+                ),
             )
+            for query_type, result_type, result in cases:
+                with self.subTest(query_type=query_type, result=result):
+                    def opener(request: Request, timeout: float) -> BytesIO:
+                        return BytesIO(
+                            json.dumps(
+                                {
+                                    "status": "success",
+                                    "data": {
+                                        "resultType": result_type,
+                                        "result": result,
+                                    },
+                                }
+                            ).encode()
+                        )
 
-        self.assertEqual(returncode, 4)
-        self.assertEqual(stdout.getvalue(), "")
-        self.assertEqual(len(stderr.getvalue().splitlines()), 1)
-        self.assertIn("incomplete results", stderr.getvalue())
-        self.assertNotIn("SECRET", stderr.getvalue())
-        self.assertNotIn("hidden", stderr.getvalue())
+                    stdout, stderr = StringIO(), StringIO()
+                    returncode = main(
+                        [
+                            "--config",
+                            str(config_path),
+                            "query",
+                            "--profile",
+                            "prod",
+                            "--query-type",
+                            query_type,
+                            "{}",
+                        ],
+                        environ={"TEST_GRAFANA_TOKEN": "token"},
+                        stdout=stdout,
+                        stderr=stderr,
+                        opener=opener,
+                    )
+
+                    self.assertEqual(returncode, 4)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertEqual(len(stderr.getvalue().splitlines()), 1)
+                    self.assertIn("incomplete results", stderr.getvalue())
+                    self.assertNotIn("SECRET", stderr.getvalue())
+                    self.assertNotIn("hidden", stderr.getvalue())
 
     def test_query_uses_injected_sleeper_for_retry_policy(self) -> None:
         attempts = 0

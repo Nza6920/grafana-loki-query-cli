@@ -192,7 +192,11 @@ def _result_from_payload(
         )
     result = data.get("result")
     if not isinstance(result, list):
-        raise QueryError(f"Loki response is missing {expected_result_type} results.")
+        return QueryResult(
+            query_type=query_type,
+            records=[],
+            skipped=ParseSummary(skipped_series=1),
+        )
 
     if query_type == "metric":
         samples: list[Record] = []
@@ -285,14 +289,23 @@ def _metric_timestamp_ns(timestamp: object) -> int:
     nanoseconds = seconds * Decimal(1_000_000_000)
     if not nanoseconds.is_finite() or nanoseconds != nanoseconds.to_integral_value():
         raise ValueError("metric timestamp has more than nanosecond precision")
-    return int(nanoseconds)
+    return _supported_timestamp_ns(int(nanoseconds))
 
 
 def _log_timestamp_ns(timestamp: object) -> int:
     nanoseconds = Decimal(str(timestamp))
     if not nanoseconds.is_finite() or nanoseconds != nanoseconds.to_integral_value():
         raise ValueError("log timestamp is not an integer")
-    return int(nanoseconds)
+    return _supported_timestamp_ns(int(nanoseconds))
+
+
+def _supported_timestamp_ns(timestamp_ns: int) -> int:
+    seconds, _ = divmod(timestamp_ns, 1_000_000_000)
+    try:
+        datetime.fromtimestamp(seconds, UTC)
+    except (OverflowError, OSError, ValueError) as error:
+        raise ValueError("timestamp is outside the supported UTC range") from error
+    return timestamp_ns
 
 
 def _labels(value: object) -> dict[str, str] | None:
