@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-通过 Grafana datasource proxy 查询 Loki `query_range` API 的只读 CLI。调用者提供完整 LogQL；CLI 负责 profile、时间范围、鉴权、重试、跨 stream 排序和稳定输出。0.1.2 版本增加 `--version`；0.1.1 版本增加了 Windows 原生配置路径和 PowerShell 指引。
+通过 Grafana datasource proxy 查询 Loki `query_range` API 的只读 CLI。调用者声明日志或指标查询并提供完整 LogQL；CLI 负责 profile、时间范围、鉴权、重试、全局结果排序和稳定输出。0.1.2 版本增加 `--version`；0.1.1 版本增加了 Windows 原生配置路径和 PowerShell 指引。
 
 ## 安装
 
@@ -73,11 +73,12 @@ PowerShell 5.1 时，请保留示例文件编码，或使用可将文件保存�
 
 ## 查询
 
-默认查询最近 15 分钟，最多返回 100 条，并按时间全局倒序输出：
+默认执行最近 15 分钟的日志查询，按 backward 方向最多返回 100 条，并按时间全局倒序输出：
 
 ```bash
 loki-query query \
   --profile prod \
+  --query-type log \
   '{namespace="newchiwan-prod"} |= "/customConfig" |= "252143"'
 ```
 
@@ -115,13 +116,30 @@ printf '%s' '{namespace="newchiwan-prod"} |= "252143"' \
 '{namespace="newchiwan-prod"} |= "252143"' | loki-query query --profile prod --output raw -
 ```
 
+指标范围查询必须显式声明，并可使用秒数或 duration 形式的 Loki 原生 step。
+指标查询会在联网前拒绝日志专用的 `--limit` 和 `--direction`；日志查询则会拒绝
+`--step`：
+
+```bash
+loki-query query \
+  --profile prod \
+  --query-type metric \
+  --step 30s \
+  --output jsonl \
+  'sum(rate({namespace="newchiwan-prod"}[5m]))'
+```
+
 输出模式：
 
-- `human`：默认，本地时间和日志正文。
-- `raw`：仅日志正文，空结果不输出内容。
-- `jsonl`：每行包含 UTC 纳秒时间、全部 labels 和正文，空结果不输出内容。
+- `human`：默认，输出 UTC RFC3339 纳秒时间、labels，以及日志正文或显式指标值。
+- `raw`：仅输出日志正文或指标原始字符串值；空结果不输出内容。
+- `jsonl`：每个结果一行。日志记录包含 `type: "log_entry"`、`timestamp`、`labels`、`line`；指标记录包含 `type: "metric_sample"`、`timestamp`、`labels`、`value`。空结果不输出内容。
 
-成功但没有匹配日志时退出码为 `0`。配置或参数错误为 `2`，Token 缺失或认证失败为 `3`，其他 Grafana/Loki 查询失败为 `4`。
+成功但没有匹配记录时退出码为 `0`；human 输出会区分没有日志条目还是没有指标样本。配置或参数错误为 `2`，Token 缺失或认证失败为 `3`，其他 Grafana/Loki 查询失败为 `4`。
+
+CLI 会防御性解析 Loki 成功响应。响应中若有损坏的 series、日志条目或指标样本，
+仍会输出有效记录，stderr 只输出一条不含记录内容的聚合警告，并以状态 `4` 退出。
+若所有记录都损坏，stdout 保持为空。
 
 CLI 只对 `429`、`502`、`503`、`504` 最多重试两次，并遵循 `Retry-After`。默认请求超时为 30 秒。Token 只从 profile 指定的环境变量读取，不进入命令行或配置文件。
 

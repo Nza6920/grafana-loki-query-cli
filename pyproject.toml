@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "loki-query"
 version = "0.1.2"
-description = "Query Loki logs through Grafana datasource proxies"
+description = "Query Loki logs and range metrics through Grafana datasource proxies"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Proprietary"}

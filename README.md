@@ -2,7 +2,7 @@
 
 [中文文档](README.zh-CN.md)
 
-A read-only CLI for querying Loki's `query_range` API through a Grafana datasource proxy. Callers provide complete LogQL queries; the CLI handles profiles, time ranges, authentication, retries, cross-stream sorting, and stable output. Version 0.1.2 adds `--version`; version 0.1.1 added native Windows configuration paths and PowerShell guidance.
+A read-only CLI for querying Loki's `query_range` API through a Grafana datasource proxy. Callers declare a log or metric query and provide complete LogQL; the CLI handles profiles, time ranges, authentication, retries, global result sorting, and stable output. Version 0.1.2 adds `--version`; version 0.1.1 added native Windows configuration paths and PowerShell guidance.
 
 ## Installation
 
@@ -76,11 +76,12 @@ file's encoding or use an editor that saves UTF-8.
 
 ## Querying
 
-By default, a query searches the last 15 minutes, returns at most 100 entries, and outputs them in global reverse chronological order:
+By default, a query is a log query over the last 15 minutes, returns at most 100 entries in backward direction, and outputs them in global reverse chronological order:
 
 ```bash
 loki-query query \
   --profile prod \
+  --query-type log \
   '{namespace="newchiwan-prod"} |= "/customConfig" |= "252143"'
 ```
 
@@ -118,13 +119,31 @@ The equivalent PowerShell pipeline is:
 '{namespace="newchiwan-prod"} |= "252143"' | loki-query query --profile prod --output raw -
 ```
 
+Declare metric range queries explicitly and optionally pass a Loki-native step
+in seconds or duration form. Metric queries reject the log-only `--limit` and
+`--direction` options; log queries reject `--step` before network access:
+
+```bash
+loki-query query \
+  --profile prod \
+  --query-type metric \
+  --step 30s \
+  --output jsonl \
+  'sum(rate({namespace="newchiwan-prod"}[5m]))'
+```
+
 Output modes:
 
-- `human`: the default; local timestamps and log lines.
-- `raw`: log lines only; an empty result produces no output.
-- `jsonl`: one line per entry containing a nanosecond UTC timestamp, all labels, and the log line; an empty result produces no output.
+- `human`: the default; UTC RFC3339 nanosecond timestamps, labels, and a log line or explicit metric value.
+- `raw`: only log lines or original metric value strings; an empty result produces no output.
+- `jsonl`: one record per result. Log records use `type: "log_entry"`, `timestamp`, `labels`, and `line`; metric records use `type: "metric_sample"`, `timestamp`, `labels`, and `value`. Empty results produce no output.
 
-A successful query with no matching logs exits with status `0`. Configuration or argument errors use `2`, a missing token or authentication failure uses `3`, and other Grafana/Loki query failures use `4`.
+A successful query with no matching records exits with status `0`; human output says whether no log entries or metric samples were found. Configuration or argument errors use `2`, a missing token or authentication failure uses `3`, and other Grafana/Loki query failures use `4`.
+
+Successful Loki payloads are parsed defensively. If a response contains malformed
+series, log entries, or metric samples, valid records are still emitted, stderr
+receives one aggregate warning without record content, and the command exits
+with status `4`. If every record is malformed, stdout stays empty.
 
 The CLI retries only `429`, `502`, `503`, and `504` responses, at most twice, and honors `Retry-After`. The default request timeout is 30 seconds. Tokens are read only from the environment variable named by the profile and never enter the command line or configuration file.
 

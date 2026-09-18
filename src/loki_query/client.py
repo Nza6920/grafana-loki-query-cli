@@ -4,10 +4,11 @@ from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
 import json
 import time
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -39,6 +40,37 @@ class LogEntry:
     line: str
 
 
+@dataclass(frozen=True)
+class MetricSample:
+    timestamp_ns: int
+    labels: dict[str, str]
+    value: str
+
+
+QueryType = Literal["log", "metric"]
+Record = LogEntry | MetricSample
+
+
+@dataclass(frozen=True)
+class ParseSummary:
+    skipped_series: int = 0
+    skipped_entries: int = 0
+    skipped_samples: int = 0
+
+    @property
+    def incomplete(self) -> bool:
+        return bool(
+            self.skipped_series or self.skipped_entries or self.skipped_samples
+        )
+
+
+@dataclass(frozen=True)
+class QueryResult:
+    query_type: QueryType
+    records: list[Record]
+    skipped: ParseSummary = ParseSummary()
+
+
 def default_opener(request: Request, timeout: float) -> ReadableResponse:
     response = urlopen(request, timeout=timeout)  # noqa: S310 - configured endpoint
     return cast(ReadableResponse, response)
@@ -51,24 +83,31 @@ def query_range(
     query: str,
     start_ns: int,
     end_ns: int,
-    limit: int,
+    query_type: QueryType = "log",
+    limit: int | None = 100,
+    direction: str | None = "backward",
+    step: str | None = None,
     timeout: float,
     opener: Opener = default_opener,
     sleeper: Sleeper = time.sleep,
-) -> list[LogEntry]:
+) -> QueryResult:
     endpoint = (
         f"{profile.grafana_url}/api/datasources/proxy/uid/"
         f"{quote(profile.datasource_uid, safe='')}/loki/api/v1/query_range"
     )
-    params = urlencode(
-        {
-            "query": query,
-            "start": str(start_ns),
-            "end": str(end_ns),
-            "limit": str(limit),
-            "direction": "backward",
-        }
-    )
+    request_params = {
+        "query": query,
+        "start": str(start_ns),
+        "end": str(end_ns),
+    }
+    if query_type == "log":
+        if limit is not None:
+            request_params["limit"] = str(limit)
+        if direction is not None:
+            request_params["direction"] = direction
+    elif step is not None:
+        request_params["step"] = step
+    params = urlencode(request_params)
     request = Request(
         f"{endpoint}?{params}",
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
@@ -81,7 +120,7 @@ def query_range(
             opener=opener,
             sleeper=sleeper,
         )
-        return _entries_from_payload(payload)
+        return _result_from_payload(payload, query_type)
     except QueryError as error:
         error_type = AuthenticationError if isinstance(error, AuthenticationError) else QueryError
         raise error_type(str(error).replace(token, "[REDACTED]")) from error
@@ -131,7 +170,7 @@ def _retry_delay(retry_after: str | None, attempt: int) -> float:
 
 def _decode_payload(body: bytes) -> dict[str, Any]:
     try:
-        payload = json.loads(body)
+        payload = json.loads(body, parse_float=Decimal)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise QueryError("Grafana returned an invalid JSON response.") from error
     if not isinstance(payload, dict):
@@ -139,29 +178,129 @@ def _decode_payload(body: bytes) -> dict[str, Any]:
     return payload
 
 
-def _entries_from_payload(payload: dict[str, Any]) -> list[LogEntry]:
+def _result_from_payload(
+    payload: dict[str, Any], query_type: QueryType
+) -> QueryResult:
     if payload.get("status") != "success":
         message = payload.get("message") or payload.get("error") or "unknown API error"
         raise QueryError(f"Loki query failed: {message}")
     data = payload.get("data")
-    if not isinstance(data, dict) or data.get("resultType") != "streams":
-        raise QueryError("Loki returned a result other than log streams.")
+    expected_result_type = "streams" if query_type == "log" else "matrix"
+    if not isinstance(data, dict) or data.get("resultType") != expected_result_type:
+        raise QueryError(
+            f"Loki returned a result other than {expected_result_type}."
+        )
     result = data.get("result")
     if not isinstance(result, list):
-        raise QueryError("Loki response is missing stream results.")
+        raise QueryError(f"Loki response is missing {expected_result_type} results.")
 
-    entries: list[LogEntry] = []
-    try:
-        for stream in result:
-            labels = stream["stream"]
-            for timestamp, line in stream["values"]:
-                entries.append(
-                    LogEntry(
-                        timestamp_ns=int(timestamp),
-                        labels={str(key): str(value) for key, value in labels.items()},
-                        line=str(line),
+    if query_type == "metric":
+        samples: list[Record] = []
+        skipped_series = 0
+        skipped_samples = 0
+        for series in result:
+            if not isinstance(series, dict):
+                skipped_series += 1
+                continue
+            labels = _labels(series.get("metric"))
+            values = series.get("values")
+            if labels is None or not isinstance(values, list):
+                skipped_series += 1
+                continue
+            for sample in values:
+                if not isinstance(sample, list) or len(sample) != 2:
+                    skipped_samples += 1
+                    continue
+                timestamp, value = sample
+                if not isinstance(value, str):
+                    skipped_samples += 1
+                    continue
+                try:
+                    timestamp_ns = _metric_timestamp_ns(timestamp)
+                except (ValueError, InvalidOperation):
+                    skipped_samples += 1
+                    continue
+                samples.append(
+                    MetricSample(
+                        timestamp_ns=timestamp_ns,
+                        labels=labels,
+                        value=value,
                     )
                 )
-    except (KeyError, TypeError, ValueError) as error:
-        raise QueryError("Loki returned malformed stream data.") from error
-    return sorted(entries, key=lambda entry: entry.timestamp_ns, reverse=True)
+        return QueryResult(
+            query_type="metric",
+            records=sorted(
+                samples, key=lambda sample: sample.timestamp_ns, reverse=True
+            ),
+            skipped=ParseSummary(
+                skipped_series=skipped_series,
+                skipped_samples=skipped_samples,
+            ),
+        )
+
+    entries: list[Record] = []
+    skipped_series = 0
+    skipped_entries = 0
+    for stream in result:
+        if not isinstance(stream, dict):
+            skipped_series += 1
+            continue
+        labels = _labels(stream.get("stream"))
+        values = stream.get("values")
+        if labels is None or not isinstance(values, list):
+            skipped_series += 1
+            continue
+        for entry in values:
+            if not isinstance(entry, list) or len(entry) != 2:
+                skipped_entries += 1
+                continue
+            timestamp, line = entry
+            if not isinstance(line, str):
+                skipped_entries += 1
+                continue
+            try:
+                timestamp_ns = _log_timestamp_ns(timestamp)
+            except (ValueError, InvalidOperation):
+                skipped_entries += 1
+                continue
+            entries.append(
+                LogEntry(
+                    timestamp_ns=timestamp_ns,
+                    labels=labels,
+                    line=line,
+                )
+            )
+    return QueryResult(
+        query_type="log",
+        records=sorted(entries, key=lambda entry: entry.timestamp_ns, reverse=True),
+        skipped=ParseSummary(
+            skipped_series=skipped_series,
+            skipped_entries=skipped_entries,
+        ),
+    )
+
+
+def _metric_timestamp_ns(timestamp: object) -> int:
+    seconds = Decimal(str(timestamp))
+    nanoseconds = seconds * Decimal(1_000_000_000)
+    if not nanoseconds.is_finite() or nanoseconds != nanoseconds.to_integral_value():
+        raise ValueError("metric timestamp has more than nanosecond precision")
+    return int(nanoseconds)
+
+
+def _log_timestamp_ns(timestamp: object) -> int:
+    nanoseconds = Decimal(str(timestamp))
+    if not nanoseconds.is_finite() or nanoseconds != nanoseconds.to_integral_value():
+        raise ValueError("log timestamp is not an integer")
+    return int(nanoseconds)
+
+
+def _labels(value: object) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    if not all(
+        isinstance(key, str) and isinstance(item, str)
+        for key, item in value.items()
+    ):
+        return None
+    return dict(value)

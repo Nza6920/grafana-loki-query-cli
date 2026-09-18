@@ -2,7 +2,7 @@ $ loki-query --help
 usage: loki-query [-h] [--version] [--config CONFIG]
                   {query,profiles,config} ...
 
-Query Loki logs through a Grafana datasource proxy.
+Query Loki logs and metrics through a Grafana datasource proxy.
 
 positional arguments:
   {query,profiles,config}
@@ -17,9 +17,11 @@ options:
                         config path).
 
 $ loki-query query --help
-usage: loki-query query [-h] --profile PROFILE [--since SINCE | --start START]
-                        [--end END] [--limit LIMIT]
-                        [--output {human,raw,jsonl}] [--timeout TIMEOUT]
+usage: loki-query query [-h] --profile PROFILE [--query-type {log,metric}]
+                        [--since SINCE | --start START] [--end END]
+                        [--limit LIMIT] [--direction {backward,forward}]
+                        [--step STEP] [--output {human,raw,jsonl}]
+                        [--timeout TIMEOUT]
                         logql
 
 positional arguments:
@@ -28,10 +30,15 @@ positional arguments:
 options:
   -h, --help            show this help message and exit
   --profile PROFILE     Named target profile.
+  --query-type {log,metric}
+                        Declared query result type (default: log).
   --since SINCE         Relative duration such as 15m or 2h.
   --start START         RFC 3339 range start.
   --end END             RFC 3339 range end (default: now).
   --limit LIMIT         Maximum log entries (1-5000; default: 100).
+  --direction {backward,forward}
+                        Log result direction (default: backward).
+  --step STEP           Metric query step in Loki seconds or duration form.
   --output {human,raw,jsonl}
                         Output format (default: human).
   --timeout TIMEOUT     HTTP timeout in seconds (default: 30).

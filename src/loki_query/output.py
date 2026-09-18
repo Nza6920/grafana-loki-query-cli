@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import json
 from typing import TextIO
 
-from .client import LogEntry
+from .client import LogEntry, MetricSample, QueryResult
 
 
 def format_timestamp_utc(timestamp_ns: int) -> str:
@@ -13,29 +13,44 @@ def format_timestamp_utc(timestamp_ns: int) -> str:
     return f"{base}.{nanoseconds:09d}Z"
 
 
-def write_entries(entries: list[LogEntry], output_format: str, stream: TextIO) -> None:
-    if not entries:
+def write_result(result: QueryResult, output_format: str, stream: TextIO) -> None:
+    if not result.records:
+        if result.skipped.incomplete:
+            return
         if output_format == "human":
-            print("No log entries found.", file=stream)
+            noun = "log entries" if result.query_type == "log" else "metric samples"
+            print(f"No {noun} found.", file=stream)
         return
-    for entry in entries:
+    for record in result.records:
         if output_format == "raw":
-            rendered = entry.line
+            rendered = record.line if isinstance(record, LogEntry) else record.value
         elif output_format == "jsonl":
+            if isinstance(record, LogEntry):
+                json_record: dict[str, object] = {
+                    "type": "log_entry",
+                    "timestamp": format_timestamp_utc(record.timestamp_ns),
+                    "labels": record.labels,
+                    "line": record.line,
+                }
+            else:
+                json_record = {
+                    "type": "metric_sample",
+                    "timestamp": format_timestamp_utc(record.timestamp_ns),
+                    "labels": record.labels,
+                    "value": record.value,
+                }
             rendered = json.dumps(
-                {
-                    "timestamp": format_timestamp_utc(entry.timestamp_ns),
-                    "labels": entry.labels,
-                    "line": entry.line,
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
+                json_record, ensure_ascii=False, separators=(",", ":")
             )
         else:
-            seconds, nanoseconds = divmod(entry.timestamp_ns, 1_000_000_000)
-            local = datetime.fromtimestamp(seconds).astimezone()
-            rendered = (
-                f"{local.strftime('%Y-%m-%d %H:%M:%S')}.{nanoseconds:09d} "
-                f"{local.strftime('%z')} {entry.line}"
+            timestamp = format_timestamp_utc(record.timestamp_ns)
+            labels = json.dumps(
+                record.labels, ensure_ascii=False, separators=(",", ":")
             )
+            rendered_payload = (
+                record.line
+                if isinstance(record, LogEntry)
+                else f"value={record.value}"
+            )
+            rendered = f"{timestamp} {labels} {rendered_payload}"
         print(rendered, file=stream)

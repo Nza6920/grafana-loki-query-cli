@@ -7,11 +7,19 @@ from importlib.metadata import PackageNotFoundError, version
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Any, NoReturn, Protocol, TextIO
 
-from .client import AuthenticationError, Opener, QueryError, default_opener, query_range
+from .client import (
+    AuthenticationError,
+    Opener,
+    QueryError,
+    Sleeper,
+    default_opener,
+    query_range,
+)
 from .config import ConfigurationError, default_config_path, load_config
-from .output import write_entries
+from .output import write_result
 from .time_range import TimeRangeError, resolve_time_range
 
 
@@ -71,7 +79,7 @@ def build_parser(
 
     parser = InvocationParser(
         prog="loki-query",
-        description="Query Loki logs through a Grafana datasource proxy.",
+        description="Query Loki logs and metrics through a Grafana datasource proxy.",
     )
     parser.add_argument(
         "--version",
@@ -92,6 +100,12 @@ def build_parser(
         help="Run a Loki query_range request.",
     )
     query_parser.add_argument("--profile", required=True, help="Named target profile.")
+    query_parser.add_argument(
+        "--query-type",
+        choices=("log", "metric"),
+        default="log",
+        help="Declared query result type (default: log).",
+    )
     range_group = query_parser.add_mutually_exclusive_group()
     range_group.add_argument("--since", help="Relative duration such as 15m or 2h.")
     range_group.add_argument("--start", help="RFC 3339 range start.")
@@ -99,8 +113,19 @@ def build_parser(
     query_parser.add_argument(
         "--limit",
         type=_limit,
-        default=100,
+        default=None,
         help="Maximum log entries (1-5000; default: 100).",
+    )
+    query_parser.add_argument(
+        "--direction",
+        choices=("backward", "forward"),
+        default=None,
+        help="Log result direction (default: backward).",
+    )
+    query_parser.add_argument(
+        "--step",
+        type=_non_empty_step,
+        help="Metric query step in Loki seconds or duration form.",
     )
     query_parser.add_argument(
         "--output",
@@ -153,6 +178,12 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
+def _non_empty_step(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("step must not be empty")
+    return value
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -161,6 +192,7 @@ def main(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
     opener: Opener = default_opener,
+    sleeper: Sleeper = time.sleep,
     now: datetime | None = None,
 ) -> int:
     """Write command output to the supplied streams and return its exit code.
@@ -185,6 +217,7 @@ def main(
             output_stream=output_stream,
             error_stream=error_stream,
             opener=opener,
+            sleeper=sleeper,
             now=now or datetime.now(UTC),
         )
     except (ConfigurationError, TimeRangeError) as error:
@@ -206,6 +239,7 @@ def _dispatch(
     output_stream: TextIO,
     error_stream: TextIO,
     opener: Opener,
+    sleeper: Sleeper,
     now: datetime,
 ) -> int:
     selected_config_path = (
@@ -229,6 +263,21 @@ def _dispatch(
             raise ConfigurationError(
                 "--end requires --start and cannot be combined with --since."
             )
+        if args.query_type == "metric":
+            invalid_flags = [
+                flag
+                for flag, value in (
+                    ("--limit", args.limit),
+                    ("--direction", args.direction),
+                )
+                if value is not None
+            ]
+            if invalid_flags:
+                raise ConfigurationError(
+                    f"{', '.join(invalid_flags)} cannot be used with metric queries."
+                )
+        elif args.step is not None:
+            raise ConfigurationError("--step cannot be used with log queries.")
         config = load_config(selected_config_path)
         profile = config.profiles.get(args.profile)
         if profile is None:
@@ -249,15 +298,33 @@ def _dispatch(
             end=args.end,
             now=now,
         )
-        entries = query_range(
+        result = query_range(
             profile=profile,
             token=token,
             query=query.strip(),
             start_ns=start_ns,
             end_ns=end_ns,
-            limit=args.limit,
+            query_type=args.query_type,
+            limit=100 if args.query_type == "log" and args.limit is None else args.limit,
+            direction=(
+                "backward"
+                if args.query_type == "log" and args.direction is None
+                else args.direction
+            ),
+            step=args.step,
             timeout=args.timeout,
             opener=opener,
+            sleeper=sleeper,
         )
-        write_entries(entries, args.output, output_stream)
+        write_result(result, args.output, output_stream)
+        if result.skipped.incomplete:
+            skipped = result.skipped
+            print(
+                "warning: incomplete results; "
+                f"skipped {skipped.skipped_series} series, "
+                f"{skipped.skipped_entries} log entries, and "
+                f"{skipped.skipped_samples} metric samples.",
+                file=error_stream,
+            )
+            return EXIT_QUERY
     return 0

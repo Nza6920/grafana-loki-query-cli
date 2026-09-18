@@ -447,11 +447,13 @@ default_selector = '{{namespace="prod"}}'
             [json.loads(line) for line in stdout.getvalue().splitlines()],
             [
                 {
+                    "type": "log_entry",
                     "timestamp": "1970-01-01T00:00:02.000000000Z",
                     "labels": {"app": "api", "pod": "pod-b"},
                     "line": "newer",
                 },
                 {
+                    "type": "log_entry",
                     "timestamp": "1970-01-01T00:00:01.000000000Z",
                     "labels": {"app": "api", "pod": "pod-a"},
                     "line": "older",
@@ -471,6 +473,437 @@ default_selector = '{{namespace="prod"}}'
         self.assertEqual(params["end"], ["1786406460000000000"])
         self.assertEqual(params["limit"], ["50"])
         self.assertEqual(params["direction"], ["backward"])
+
+    def test_metric_query_flattens_and_sorts_jsonl_samples(self) -> None:
+        observed_url: list[str] = []
+
+        def opener(request: Request, timeout: float) -> BytesIO:
+            observed_url.append(request.full_url)
+            return BytesIO(
+                json.dumps(
+                    {
+                        "status": "success",
+                        "data": {
+                            "resultType": "matrix",
+                            "result": [
+                                {
+                                    "metric": {"app": "api", "pod": "pod-a"},
+                                    "values": [[1.000000001, "0.10000000000000001"]],
+                                },
+                                {
+                                    "metric": {"app": "api", "pod": "pod-b"},
+                                    "values": [[2, "3.5"]],
+                                },
+                            ],
+                        },
+                    }
+                ).encode()
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                '[profiles.prod]\ngrafana_url = "https://grafana.example.com"\n'
+                'datasource_uid = "loki"\ntoken_env = "TEST_GRAFANA_TOKEN"\n',
+                encoding="utf-8",
+            )
+            stdout, stderr = StringIO(), StringIO()
+            returncode = main(
+                [
+                    "--config",
+                    str(config_path),
+                    "query",
+                    "--profile",
+                    "prod",
+                    "--query-type",
+                    "metric",
+                    "--step",
+                    "30s",
+                    "--output",
+                    "jsonl",
+                    'sum(rate({app="api"}[5m]))',
+                ],
+                environ={"TEST_GRAFANA_TOKEN": "token"},
+                stdout=stdout,
+                stderr=stderr,
+                opener=opener,
+                now=datetime(2026, 8, 11, tzinfo=UTC),
+            )
+
+        self.assertEqual(returncode, 0, stderr.getvalue())
+        self.assertEqual(
+            [json.loads(line) for line in stdout.getvalue().splitlines()],
+            [
+                {
+                    "type": "metric_sample",
+                    "timestamp": "1970-01-01T00:00:02.000000000Z",
+                    "labels": {"app": "api", "pod": "pod-b"},
+                    "value": "3.5",
+                },
+                {
+                    "type": "metric_sample",
+                    "timestamp": "1970-01-01T00:00:01.000000001Z",
+                    "labels": {"app": "api", "pod": "pod-a"},
+                    "value": "0.10000000000000001",
+                },
+            ],
+        )
+        params = parse_qs(urlparse(observed_url[0]).query)
+        self.assertEqual(params["step"], ["30s"])
+        self.assertNotIn("limit", params)
+        self.assertNotIn("direction", params)
+
+    def test_metric_query_supports_human_and_raw_output(self) -> None:
+        def opener(request: Request, timeout: float) -> BytesIO:
+            return BytesIO(
+                b'{"status":"success","data":{"resultType":"matrix",'
+                b'"result":[{"metric":{"namespace":"production"},'
+                b'"values":[[1.000000001,"0.10000000000000001"]]}]}}'
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                '[profiles.prod]\ngrafana_url = "https://grafana.example.com"\n'
+                'datasource_uid = "loki"\ntoken_env = "TEST_GRAFANA_TOKEN"\n',
+                encoding="utf-8",
+            )
+            outputs: dict[str, str] = {}
+            for output_format in ("human", "raw"):
+                stdout, stderr = StringIO(), StringIO()
+                returncode = main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "query",
+                        "--profile",
+                        "prod",
+                        "--query-type",
+                        "metric",
+                        "--output",
+                        output_format,
+                        "{}",
+                    ],
+                    environ={"TEST_GRAFANA_TOKEN": "token"},
+                    stdout=stdout,
+                    stderr=stderr,
+                    opener=opener,
+                )
+                self.assertEqual(returncode, 0, stderr.getvalue())
+                outputs[output_format] = stdout.getvalue()
+
+        self.assertEqual(
+            outputs["human"],
+            '1970-01-01T00:00:01.000000001Z {"namespace":"production"} '
+            "value=0.10000000000000001\n",
+        )
+        self.assertEqual(outputs["raw"], "0.10000000000000001\n")
+
+    def test_query_type_rejects_incompatible_flags_before_network_access(self) -> None:
+        calls = 0
+
+        def opener(request: Request, timeout: float) -> BytesIO:
+            nonlocal calls
+            calls += 1
+            return BytesIO(
+                b'{"status":"success","data":{"resultType":"streams","result":[]}}'
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                '[profiles.prod]\ngrafana_url = "https://grafana.example.com"\n'
+                'datasource_uid = "loki"\ntoken_env = "TEST_GRAFANA_TOKEN"\n',
+                encoding="utf-8",
+            )
+            cases = (
+                (["--query-type", "metric", "--limit", "1"], "--limit"),
+                (
+                    ["--query-type", "metric", "--direction", "forward"],
+                    "--direction",
+                ),
+                (["--query-type", "log", "--step", "15"], "--step"),
+            )
+            for flags, invalid_flag in cases:
+                with self.subTest(flags=flags):
+                    stdout, stderr = StringIO(), StringIO()
+                    returncode = main(
+                        [
+                            "--config",
+                            str(config_path),
+                            "query",
+                            "--profile",
+                            "prod",
+                            *flags,
+                            "{}",
+                        ],
+                        environ={"TEST_GRAFANA_TOKEN": "token"},
+                        stdout=stdout,
+                        stderr=stderr,
+                        opener=opener,
+                    )
+                    self.assertEqual(returncode, 2)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertIn(invalid_flag, stderr.getvalue())
+
+        self.assertEqual(calls, 0)
+
+    def test_declared_query_type_rejects_mismatched_or_unknown_results(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                '[profiles.prod]\ngrafana_url = "https://grafana.example.com"\n'
+                'datasource_uid = "loki"\ntoken_env = "TEST_GRAFANA_TOKEN"\n',
+                encoding="utf-8",
+            )
+            cases = (
+                ("log", "matrix", "streams"),
+                ("metric", "streams", "matrix"),
+                ("metric", "vector", "matrix"),
+            )
+            for query_type, result_type, expected in cases:
+                with self.subTest(query_type=query_type, result_type=result_type):
+                    def opener(request: Request, timeout: float) -> BytesIO:
+                        return BytesIO(
+                            json.dumps(
+                                {
+                                    "status": "success",
+                                    "data": {"resultType": result_type, "result": []},
+                                }
+                            ).encode()
+                        )
+
+                    stdout, stderr = StringIO(), StringIO()
+                    returncode = main(
+                        [
+                            "--config",
+                            str(config_path),
+                            "query",
+                            "--profile",
+                            "prod",
+                            "--query-type",
+                            query_type,
+                            "{}",
+                        ],
+                        environ={"TEST_GRAFANA_TOKEN": "token"},
+                        stdout=stdout,
+                        stderr=stderr,
+                        opener=opener,
+                    )
+                    self.assertEqual(returncode, 4)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertIn(expected, stderr.getvalue())
+
+    def test_empty_metric_result_has_type_specific_machine_and_human_output(self) -> None:
+        def opener(request: Request, timeout: float) -> BytesIO:
+            return BytesIO(
+                b'{"status":"success","data":{"resultType":"matrix","result":[]}}'
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                '[profiles.prod]\ngrafana_url = "https://grafana.example.com"\n'
+                'datasource_uid = "loki"\ntoken_env = "TEST_GRAFANA_TOKEN"\n',
+                encoding="utf-8",
+            )
+            outputs: dict[str, str] = {}
+            for output_format in ("human", "raw", "jsonl"):
+                stdout, stderr = StringIO(), StringIO()
+                returncode = main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "query",
+                        "--profile",
+                        "prod",
+                        "--query-type",
+                        "metric",
+                        "--output",
+                        output_format,
+                        "{}",
+                    ],
+                    environ={"TEST_GRAFANA_TOKEN": "token"},
+                    stdout=stdout,
+                    stderr=stderr,
+                    opener=opener,
+                )
+                self.assertEqual(returncode, 0, stderr.getvalue())
+                outputs[output_format] = stdout.getvalue()
+
+        self.assertEqual(outputs["human"], "No metric samples found.\n")
+        self.assertEqual(outputs["raw"], "")
+        self.assertEqual(outputs["jsonl"], "")
+
+    def test_partial_stream_and_matrix_results_emit_valid_records_and_one_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                '[profiles.prod]\ngrafana_url = "https://grafana.example.com"\n'
+                'datasource_uid = "loki"\ntoken_env = "TEST_GRAFANA_TOKEN"\n',
+                encoding="utf-8",
+            )
+            cases = (
+                (
+                    "log",
+                    "streams",
+                    [
+                        {
+                            "stream": {"app": "safe"},
+                            "values": [["2000000000", "valid line"], ["bad", "SECRET_LINE"]],
+                        },
+                        {"stream": {"SECRET_LABEL": "hidden"}, "values": "bad"},
+                    ],
+                    "valid line",
+                ),
+                (
+                    "metric",
+                    "matrix",
+                    [
+                        {
+                            "metric": {"app": "safe"},
+                            "values": [[2, "valid-value"], ["bad", "SECRET_VALUE"]],
+                        },
+                        {"metric": {"SECRET_LABEL": "hidden"}, "values": "bad"},
+                    ],
+                    "valid-value",
+                ),
+            )
+            for query_type, result_type, result, valid_payload in cases:
+                with self.subTest(query_type=query_type):
+                    def opener(request: Request, timeout: float) -> BytesIO:
+                        return BytesIO(
+                            json.dumps(
+                                {
+                                    "status": "success",
+                                    "data": {
+                                        "resultType": result_type,
+                                        "result": result,
+                                    },
+                                }
+                            ).encode()
+                        )
+
+                    stdout, stderr = StringIO(), StringIO()
+                    returncode = main(
+                        [
+                            "--config",
+                            str(config_path),
+                            "query",
+                            "--profile",
+                            "prod",
+                            "--query-type",
+                            query_type,
+                            "--output",
+                            "jsonl",
+                            "{}",
+                        ],
+                        environ={"TEST_GRAFANA_TOKEN": "token"},
+                        stdout=stdout,
+                        stderr=stderr,
+                        opener=opener,
+                    )
+
+                    self.assertEqual(returncode, 4)
+                    self.assertIn(valid_payload, stdout.getvalue())
+                    warning_lines = stderr.getvalue().splitlines()
+                    self.assertEqual(len(warning_lines), 1)
+                    self.assertIn("incomplete results", warning_lines[0])
+                    self.assertIn("skipped 1 series", warning_lines[0])
+                    self.assertNotIn("SECRET", stderr.getvalue())
+                    self.assertNotIn("hidden", stderr.getvalue())
+
+    def test_wholly_malformed_success_has_empty_stdout_and_query_error(self) -> None:
+        def opener(request: Request, timeout: float) -> BytesIO:
+            return BytesIO(
+                b'{"status":"success","data":{"resultType":"matrix",'
+                b'"result":[{"metric":{"SECRET_LABEL":"hidden"},"values":"bad"}]}}'
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                '[profiles.prod]\ngrafana_url = "https://grafana.example.com"\n'
+                'datasource_uid = "loki"\ntoken_env = "TEST_GRAFANA_TOKEN"\n',
+                encoding="utf-8",
+            )
+            stdout, stderr = StringIO(), StringIO()
+            returncode = main(
+                [
+                    "--config",
+                    str(config_path),
+                    "query",
+                    "--profile",
+                    "prod",
+                    "--query-type",
+                    "metric",
+                    "{}",
+                ],
+                environ={"TEST_GRAFANA_TOKEN": "token"},
+                stdout=stdout,
+                stderr=stderr,
+                opener=opener,
+            )
+
+        self.assertEqual(returncode, 4)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(len(stderr.getvalue().splitlines()), 1)
+        self.assertIn("incomplete results", stderr.getvalue())
+        self.assertNotIn("SECRET", stderr.getvalue())
+        self.assertNotIn("hidden", stderr.getvalue())
+
+    def test_query_uses_injected_sleeper_for_retry_policy(self) -> None:
+        attempts = 0
+        sleeps: list[float] = []
+        observed_url: list[str] = []
+
+        def opener(request: Request, timeout: float) -> BytesIO:
+            nonlocal attempts
+            attempts += 1
+            observed_url.append(request.full_url)
+            if attempts < 3:
+                headers = Message()
+                headers["Retry-After"] = "0"
+                raise HTTPError(request.full_url, 503, "unavailable", headers, None)
+            return BytesIO(
+                b'{"status":"success","data":{"resultType":"matrix","result":[]}}'
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                '[profiles.prod]\ngrafana_url = "https://grafana.example.com"\n'
+                'datasource_uid = "loki"\ntoken_env = "TEST_GRAFANA_TOKEN"\n',
+                encoding="utf-8",
+            )
+            returncode = main(
+                [
+                    "--config",
+                    str(config_path),
+                    "query",
+                    "--profile",
+                    "prod",
+                    "--query-type",
+                    "metric",
+                    "--step",
+                    "15",
+                    "--output",
+                    "raw",
+                    "{}",
+                ],
+                environ={"TEST_GRAFANA_TOKEN": "token"},
+                stdout=StringIO(),
+                stderr=StringIO(),
+                opener=opener,
+                sleeper=sleeps.append,
+            )
+
+        self.assertEqual(returncode, 0)
+        self.assertEqual(attempts, 3)
+        self.assertEqual(sleeps, [0.0, 0.0])
+        self.assertEqual(
+            parse_qs(urlparse(observed_url[-1]).query)["step"], ["15"]
+        )
 
     def test_query_reports_auth_failure_with_stable_exit_code(self) -> None:
         def opener(request: Request, timeout: float) -> BytesIO:

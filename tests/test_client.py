@@ -55,7 +55,7 @@ class RetryTests(unittest.TestCase):
                 raise HTTPError(request.full_url, 503, "unavailable", headers, None)
             return success_response()
 
-        entries = query_range(
+        result = query_range(
             profile=PROFILE,
             token="secret-token",
             query='{namespace="prod"}',
@@ -67,7 +67,8 @@ class RetryTests(unittest.TestCase):
             sleeper=sleeps.append,
         )
 
-        self.assertEqual(entries, [])
+        self.assertEqual(result.query_type, "log")
+        self.assertEqual(result.records, [])
         self.assertEqual(attempts, 3)
         self.assertEqual(sleeps, [0.0, 0.0])
 
