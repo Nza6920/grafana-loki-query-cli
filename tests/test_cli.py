@@ -74,11 +74,11 @@ class CliHelpTests(unittest.TestCase):
 
     def test_version_returns_success_and_uses_injected_stdout(self) -> None:
         stdout, stderr, ambient_stdout = StringIO(), StringIO(), StringIO()
-        with patch("loki_query.cli.version", return_value="0.1.2"), redirect_stdout(ambient_stdout):
+        with patch("loki_query.cli.version", return_value="0.2.0"), redirect_stdout(ambient_stdout):
             result = main(["--version"], stdout=stdout, stderr=stderr, environ={})
 
         self.assertEqual(result, 0)
-        self.assertEqual(stdout.getvalue(), "loki-query 0.1.2\n")
+        self.assertEqual(stdout.getvalue(), "loki-query 0.2.0\n")
         self.assertEqual(stderr.getvalue(), "")
         self.assertEqual(ambient_stdout.getvalue(), "")
 
@@ -107,10 +107,10 @@ class CliHelpTests(unittest.TestCase):
                 self.assertEqual(ambient_stderr.getvalue(), "")
 
     def test_version_reports_installed_distribution_without_loading_config(self) -> None:
-        result = run_cli("--version", distribution_version="0.1.2")
+        result = run_cli("--version", distribution_version="0.2.0")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "loki-query 0.1.2")
+        self.assertEqual(result.stdout.strip(), "loki-query 0.2.0")
         self.assertEqual(result.stderr, "")
 
     def test_version_reports_actionable_error_without_distribution_metadata(self) -> None:
