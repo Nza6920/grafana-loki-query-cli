@@ -32,8 +32,10 @@ def configure_trace_parser(
     parser.add_argument('--direction', choices=('backward', 'forward'), default='backward')
     parser.add_argument('--output', choices=('human', 'raw', 'jsonl'), default='human')
     parser.add_argument('--service-field', default='app', help='Returned service label (default: app).')
-    parser.add_argument('--field', dest='fields', action='append', help='Literal top-level JSON field; repeat to match any selected field.')
-    parser.add_argument('--path', dest='paths', action='append', help='JSON Pointer to nested object members; repeat to match any selected path.')
+    parser.add_argument('--field', dest='fields', metavar='NAME', action='append',
+                        help='Literal top-level JSON field; repeat to match any selected field.')
+    parser.add_argument('--path', dest='paths', metavar='POINTER', action='append',
+                        help='JSON Pointer to nested object members; repeat to match any selected path.')
     parser.add_argument('--timeout', type=timeout_type, default=30.0)
     parser.add_argument('--report', help='Write trace completeness JSON to this file.')
 
