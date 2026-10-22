@@ -40,7 +40,17 @@ def parse_rfc3339(value: str) -> datetime:
 
 
 def to_nanoseconds(value: datetime) -> int:
-    return int(value.timestamp()) * 1_000_000_000 + value.microsecond * 1_000
+    delta = value.astimezone(UTC) - datetime(1970, 1, 1, tzinfo=UTC)
+    return (delta.days * 86400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1000
+
+
+def parse_rfc3339_ns(value: str) -> int:
+    fraction = re.search(r"[.,](\d+)(?=Z$|[+-]\d{2}:?\d{2}$)", value)
+    if fraction and len(fraction.group(1)) > 9:
+        raise TimeRangeError("Timestamp must not exceed nanosecond precision.")
+    parsed = parse_rfc3339(value)
+    remainder = int(fraction.group(1).ljust(9, "0")) % 1000 if fraction else 0
+    return to_nanoseconds(parsed) + remainder
 
 
 def resolve_time_range(
@@ -50,11 +60,12 @@ def resolve_time_range(
     end: str | None,
     now: datetime,
 ) -> tuple[int, int]:
-    end_time = parse_rfc3339(end) if end else now.astimezone(UTC)
+    end_ns = parse_rfc3339_ns(end) if end else to_nanoseconds(now)
     if start:
-        start_time = parse_rfc3339(start)
+        start_ns = parse_rfc3339_ns(start)
     else:
-        start_time = end_time - parse_duration(since or "15m")
-    if start_time >= end_time:
+        duration = parse_duration(since or "15m")
+        start_ns = end_ns - (duration.days * 86400 + duration.seconds) * 1_000_000_000
+    if start_ns >= end_ns:
         raise TimeRangeError("Query start must be earlier than query end.")
-    return to_nanoseconds(start_time), to_nanoseconds(end_time)
+    return start_ns, end_ns

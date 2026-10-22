@@ -1,26 +1,36 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 import os
+import math
 from pathlib import Path
 import sys
 import time
 from typing import Any, NoReturn, Protocol, TextIO
+from urllib.request import Request
 
 from .client import (
     AuthenticationError,
+    HttpAttemptBudgetError,
     Opener,
     QueryError,
+    ReadableResponse,
     Sleeper,
     default_opener,
     query_range,
+    query_endpoint,
 )
 from .config import ConfigurationError, default_config_path, load_config
+from .persistence import WorkDirectory
 from .output import write_result
+from .reporting import log_report, validate_report_destination, write_log_report
+from .scanning import ScanOptions, ScanOutcome, scan_range
 from .time_range import TimeRangeError, resolve_time_range
+from .trace import (annotate_trace, configure_trace_parser, run_trace,
+                    validate_trace_resume, write_trace_outcome)
 
 
 EXIT_CONFIG = 2
@@ -114,7 +124,7 @@ def build_parser(
         "--limit",
         type=_limit,
         default=None,
-        help="Maximum log entries (1-5000; default: 100).",
+        help="Maximum entries per request (1-5000; default: 100, scan: 1000).",
     )
     query_parser.add_argument(
         "--direction",
@@ -139,7 +149,38 @@ def build_parser(
         default=30.0,
         help="HTTP timeout in seconds (default: 30).",
     )
+    query_parser.add_argument("--scan", action="store_true", help="Adaptively scan dense or timed-out intervals with bounded execution.")
+    query_parser.add_argument("--max-http-attempts", type=_positive_int, help="HTTP attempt ceiling including retries (scan default: 60); explicit cap emits stderr accounting.")
+    query_parser.add_argument("--max-elapsed-seconds", type=_positive_float, help="Scan elapsed budget (default: 300).")
+    query_parser.add_argument("--max-records", type=_positive_int, help="Scan retained record budget (default: 10000).")
+    query_parser.add_argument("--work-dir", help="Persist scan progress and evidence in this explicit directory.")
+    query_parser.add_argument("--report", help="Write log completeness JSON to this file.")
     query_parser.add_argument("logql", help="Complete LogQL query, or - to read stdin.")
+    configure_trace_parser(
+        subparsers.add_parser("trace", help="Query exact trace IDs and show a timeline."),
+        limit_type=_limit, timeout_type=_positive_float, budget_type=_positive_int,
+    )
+    export_parser = subparsers.add_parser("export", help="Export a saved scan without configuration, credentials, or HTTP.")
+    export_parser.add_argument("--work-dir", required=True, help="Saved scan directory.")
+    export_parser.add_argument("--output", choices=("human", "raw", "jsonl"), default="human")
+    export_parser.add_argument("--service-field", default="app", help="Trace service label for human output.")
+    export_parser.add_argument("--report", help="Write saved completeness JSON to this file.")
+    resume_parser = subparsers.add_parser("resume", help="Continue only unresolved saved scan intervals.")
+    resume_parser.add_argument("--work-dir", required=True, help="Saved scan directory.")
+    resume_parser.add_argument("--profile", required=True, help="Explicit original target profile.")
+    resume_parser.add_argument("--limit", type=_limit, default=1000, help="Entries per request (default: 1000).")
+    resume_parser.add_argument("--max-http-attempts", type=_positive_int, help="HTTP attempt ceiling including retries (default: 60); explicit cap emits stderr accounting.")
+    resume_parser.add_argument("--max-elapsed-seconds", type=_positive_float, default=300.0)
+    resume_parser.add_argument("--max-records", type=_positive_int, default=10000)
+    resume_parser.add_argument("--timeout", type=_positive_float, default=30.0)
+    resume_parser.add_argument("--output", choices=("human", "raw", "jsonl"), default="human")
+    resume_parser.add_argument("--service-field", default="app", help="Trace service label for human output.")
+    resume_parser.add_argument("--trace-id", help="Assert the saved trace ID without changing scope.")
+    resume_parser.add_argument("--source", choices=("json", "label"), help="Assert the saved trace source.")
+    resume_parser.add_argument("--selector", help="Assert the saved trace selector.")
+    resume_parser.add_argument("--field", dest="fields", action="append", help="Assert the saved trace field mapping.")
+    resume_parser.add_argument("--path", dest="paths", action="append", help="Assert the saved trace JSON Pointer mapping.")
+    resume_parser.add_argument("--report", help="Write current and cumulative completeness JSON.")
     profiles_parser = subparsers.add_parser(
         "profiles", help="Inspect configured profiles."
     )
@@ -168,13 +209,23 @@ def _limit(value: str) -> int:
     return parsed
 
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("budget must be an integer") from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("budget must be positive")
+    return parsed
+
+
 def _positive_float(value: str) -> float:
     try:
         parsed = float(value)
     except ValueError as error:
         raise argparse.ArgumentTypeError("timeout must be a number") from error
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("timeout must be positive")
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be finite and positive")
     return parsed
 
 
@@ -194,6 +245,7 @@ def main(
     opener: Opener = default_opener,
     sleeper: Sleeper = time.sleep,
     now: datetime | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> int:
     """Write command output to the supplied streams and return its exit code.
 
@@ -209,6 +261,21 @@ def main(
         args = parser.parse_args(argv)
     except _ParserExit as outcome:
         return outcome.status
+    attempts = 0
+    cap = getattr(args, "max_http_attempts", None)
+
+    def bounded_opener(request: Request, timeout: float) -> ReadableResponse:
+        nonlocal attempts
+        if cap is not None and attempts >= cap:
+            raise HttpAttemptBudgetError("HTTP attempt budget exhausted.")
+        attempts += 1
+        return opener(request, timeout)
+
+    def bounded_sleeper(seconds: float) -> None:
+        if cap is not None and attempts >= cap:
+            raise HttpAttemptBudgetError("HTTP attempt budget exhausted before retry wait.")
+        sleeper(seconds)
+
     try:
         return _dispatch(
             args,
@@ -216,9 +283,10 @@ def main(
             input_stream=input_stream,
             output_stream=output_stream,
             error_stream=error_stream,
-            opener=opener,
-            sleeper=sleeper,
+            opener=bounded_opener,
+            sleeper=bounded_sleeper,
             now=now or datetime.now(UTC),
+            monotonic=monotonic,
         )
     except (ConfigurationError, TimeRangeError) as error:
         print(f"error: {error}", file=error_stream)
@@ -229,6 +297,9 @@ def main(
     except QueryError as error:
         print(f"error: {error}", file=error_stream)
         return EXIT_QUERY
+    finally:
+        if cap is not None:
+            print(f"HTTP attempt accounting: used={attempts} cap={cap}", file=error_stream)
 
 
 def _dispatch(
@@ -241,12 +312,64 @@ def _dispatch(
     opener: Opener,
     sleeper: Sleeper,
     now: datetime,
+    monotonic: Callable[[], float],
 ) -> int:
     selected_config_path = (
         Path(args.config).expanduser()
         if args.config
         else default_config_path(environ=environment)
     )
+    if args.command == "export":
+        validate_report_destination(args.report)
+        work = WorkDirectory(args.work_dir)
+        work.validate_report(args.report)
+        _, saved = work.load()
+        if 'trace' in saved.report:
+            if not args.service_field.strip():
+                raise ConfigurationError('Service field must not be empty.')
+            return write_trace_outcome(saved, args, output_stream, error_stream, token="")
+        write_result(saved.result, args.output, output_stream)
+        write_log_report(saved.report, args.report, error_stream, token="")
+        return saved.exit_code
+    if args.command == "resume":
+        validate_report_destination(args.report)
+        with WorkDirectory(args.work_dir).writer() as work:
+            work.validate_report(args.report)
+            identity, saved = work.load()
+            config = load_config(selected_config_path)
+            profile = config.profiles.get(args.profile)
+            if profile is None:
+                raise ConfigurationError(f"Unknown profile: {args.profile!r}.")
+            target = {"endpoint": query_endpoint(profile), "datasource_uid": profile.datasource_uid}
+            if identity['profile'] != profile.name or identity['target'] != target:
+                raise ConfigurationError("Saved investigation profile or target does not match; use a fresh investigation for changed scope.")
+            metadata = identity.get('trace')
+            validate_trace_resume(args, metadata)
+            if not args.service_field.strip():
+                raise ConfigurationError('Service field must not be empty.')
+            def save_progress(value: ScanOutcome) -> None:
+                if metadata is not None:
+                    annotate_trace(value, metadata)
+                work.save(value, identity=identity)
+            resume_token = environment.get(profile.token_env, "")
+            if any(interval.reasons for interval in saved.intervals) and not resume_token:
+                raise AuthenticationError(f"token environment variable {profile.token_env!r} is not set.")
+            outcome = scan_range(
+                profile=profile, token=resume_token, query=identity['query'],
+                start_ns=int(identity['start_ns']), end_ns=int(identity['end_ns']),
+                direction=identity['direction'],
+                options=ScanOptions(limit=args.limit, max_http_attempts=args.max_http_attempts or 60,
+                    max_elapsed_seconds=args.max_elapsed_seconds, max_records=args.max_records,
+                    timeout=args.timeout),
+                opener=opener, sleeper=sleeper, monotonic=monotonic, seed=saved,
+                progress=save_progress,
+            )
+        if metadata is not None:
+            annotate_trace(outcome, metadata)
+            return write_trace_outcome(outcome, args, output_stream, error_stream, token=resume_token)
+        write_result(outcome.result, args.output, output_stream)
+        write_log_report(outcome.report, args.report, error_stream, token=resume_token)
+        return outcome.exit_code
     if args.command == "config" and args.config_command == "path":
         print(selected_config_path, file=output_stream)
     elif args.command == "config" and args.config_command == "validate":
@@ -258,17 +381,33 @@ def _dispatch(
         config = load_config(selected_config_path)
         for profile_name in sorted(config.profiles):
             print(profile_name, file=output_stream)
+    elif args.command == "trace":
+        return run_trace(args, config_path=selected_config_path, environment=environment,
+                         stdout=output_stream, stderr=error_stream, opener=opener,
+                         sleeper=sleeper, now=now, monotonic=monotonic)
     elif args.command == "query":
         if args.end and not args.start:
             raise ConfigurationError(
                 "--end requires --start and cannot be combined with --since."
             )
+        scan_flags = [flag for flag, value in (
+            ("--max-elapsed-seconds", args.max_elapsed_seconds),
+            ("--max-records", args.max_records),
+            ("--work-dir", args.work_dir),
+        ) if value is not None]
+        if args.scan:
+            scan_flags.append("--scan")
+        if scan_flags and args.query_type == "metric":
+            raise ConfigurationError(f"{', '.join(scan_flags)} cannot be used with metric queries.")
+        if scan_flags and not args.scan:
+            raise ConfigurationError(f"{', '.join(scan_flags)} requires --scan.")
         if args.query_type == "metric":
             invalid_flags = [
                 flag
                 for flag, value in (
                     ("--limit", args.limit),
                     ("--direction", args.direction),
+                    ("--report", args.report),
                 )
                 if value is not None
             ]
@@ -278,6 +417,7 @@ def _dispatch(
                 )
         elif args.step is not None:
             raise ConfigurationError("--step cannot be used with log queries.")
+        validate_report_destination(args.report)
         config = load_config(selected_config_path)
         profile = config.profiles.get(args.profile)
         if profile is None:
@@ -298,26 +438,80 @@ def _dispatch(
             end=args.end,
             now=now,
         )
-        result = query_range(
-            profile=profile,
-            token=token,
-            query=query.strip(),
-            start_ns=start_ns,
-            end_ns=end_ns,
-            query_type=args.query_type,
-            limit=100 if args.query_type == "log" and args.limit is None else args.limit,
-            direction=(
-                "backward"
-                if args.query_type == "log" and args.direction is None
-                else args.direction
-            ),
-            step=args.step,
-            timeout=args.timeout,
-            opener=opener,
-            sleeper=sleeper,
-        )
+        if args.scan:
+            def execute_scan(progress: Callable[[ScanOutcome], None] | None = None) -> ScanOutcome:
+                return scan_range(
+                    profile=profile, token=token, query=query.strip(), start_ns=start_ns, end_ns=end_ns,
+                    direction=args.direction or "backward",
+                    options=ScanOptions(limit=args.limit or 1000,
+                        max_http_attempts=args.max_http_attempts or 60,
+                        max_elapsed_seconds=args.max_elapsed_seconds or 300.0,
+                        max_records=args.max_records or 10000, timeout=args.timeout),
+                    opener=opener, sleeper=sleeper, monotonic=monotonic, progress=progress,
+                )
+            if args.work_dir is not None:
+                with WorkDirectory(args.work_dir).writer() as work:
+                    work.validate_report(args.report)
+                    work.require_new()
+                    outcome = execute_scan(work.save)
+            else:
+                outcome = execute_scan()
+            write_result(outcome.result, args.output, output_stream)
+            write_log_report(outcome.report, args.report, error_stream, token=token)
+            return outcome.exit_code
+        started = monotonic()
+        attempts = 0
+
+        def counted_opener(request: Request, timeout: float) -> ReadableResponse:
+            nonlocal attempts
+            attempts += 1
+            return opener(request, timeout)
+
+        try:
+            result = query_range(
+                profile=profile,
+                token=token,
+                query=query.strip(),
+                start_ns=start_ns,
+                end_ns=end_ns,
+                query_type=args.query_type,
+                limit=100 if args.query_type == "log" and args.limit is None else args.limit,
+                direction=(
+                    "backward"
+                    if args.query_type == "log" and args.direction is None
+                    else args.direction
+                ),
+                step=args.step,
+                timeout=args.timeout,
+                opener=counted_opener,
+                sleeper=sleeper,
+            )
+        except QueryError as error:
+            if args.query_type == "log":
+                report = log_report(
+                    profile=profile, query=query.strip(), start_ns=start_ns, end_ns=end_ns,
+                    direction=args.direction or "backward", limit=args.limit or 100,
+                    result=None, attempts=attempts, timeout=args.timeout,
+                    elapsed_seconds=max(0.0, monotonic() - started),
+                    failure_reason=("authentication_failed" if isinstance(error, AuthenticationError)
+                                    else "http_attempt_budget" if isinstance(error, HttpAttemptBudgetError)
+                                    else "request_failed"),
+                    max_http_attempts=min(3, args.max_http_attempts or 3),
+                )
+                write_log_report(report, args.report, error_stream, token=token)
+            raise
         write_result(result, args.output, output_stream)
+        if args.query_type == "log":
+            report = log_report(
+                profile=profile, query=query.strip(), start_ns=start_ns, end_ns=end_ns,
+                direction=args.direction or "backward", limit=args.limit or 100,
+                result=result, attempts=attempts, timeout=args.timeout, elapsed_seconds=max(0.0, monotonic() - started),
+                max_http_attempts=min(3, args.max_http_attempts or 3),
+            )
+            write_log_report(report, args.report, error_stream, token=token)
         if result.skipped.incomplete:
+            if args.query_type == "log":
+                return EXIT_QUERY
             skipped = result.skipped
             print(
                 "warning: incomplete results; "
