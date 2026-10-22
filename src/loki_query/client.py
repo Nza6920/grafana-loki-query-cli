@@ -29,6 +29,14 @@ class QueryError(RuntimeError):
     """Raised when Grafana or Loki cannot return a usable response."""
 
 
+class InvalidQueryError(QueryError):
+    """Raised for invalid request parameters or LogQL."""
+
+
+class QueryTimeoutError(QueryError):
+    """Raised when a range request times out."""
+
+
 class AuthenticationError(QueryError):
     """Raised when Grafana rejects the configured bearer token."""
 
@@ -128,7 +136,7 @@ def query_range(
         )
         return _result_from_payload(payload, query_type)
     except QueryError as error:
-        error_type = AuthenticationError if isinstance(error, AuthenticationError) else QueryError
+        error_type = type(error)
         raise error_type(str(error).replace(token, "[REDACTED]")) from error
 
 
@@ -149,13 +157,18 @@ def _request_payload(
                 raise AuthenticationError(
                     f"Grafana request failed with HTTP {error.code}."
                 ) from error
+            if error.code in {400, 422}:
+                raise InvalidQueryError(f"Grafana request failed with HTTP {error.code}.") from error
+            if error.code == 504 and attempt == 2:
+                raise QueryTimeoutError("Grafana request failed with HTTP 504.") from error
             if error.code not in retryable_statuses or attempt == 2:
                 raise QueryError(f"Grafana request failed with HTTP {error.code}.") from error
             retry_after = error.headers.get("Retry-After")
             sleeper(_retry_delay(retry_after, attempt))
         except (URLError, TimeoutError) as error:
             reason = error.reason if isinstance(error, URLError) else "timed out"
-            raise QueryError(f"Grafana request failed: {reason}.") from error
+            error_type = QueryTimeoutError if isinstance(error, TimeoutError) or isinstance(reason, TimeoutError) else QueryError
+            raise error_type(f"Grafana request failed: {reason}.") from error
     raise AssertionError("retry loop must return or raise")
 
 
@@ -189,7 +202,8 @@ def _result_from_payload(
 ) -> QueryResult:
     if payload.get("status") != "success":
         message = payload.get("message") or payload.get("error") or "unknown API error"
-        raise QueryError(f"Loki query failed: {message}")
+        error_type = InvalidQueryError if payload.get("errorType") in {"bad_data", "parse"} else QueryError
+        raise error_type(f"Loki query failed: {message}")
     data = payload.get("data")
     expected_result_type = "streams" if query_type == "log" else "matrix"
     if not isinstance(data, dict) or data.get("resultType") != expected_result_type:

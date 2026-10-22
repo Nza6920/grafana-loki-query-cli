@@ -21,7 +21,10 @@ usage: loki-query query [-h] --profile PROFILE [--query-type {log,metric}]
                         [--since SINCE | --start START] [--end END]
                         [--limit LIMIT] [--direction {backward,forward}]
                         [--step STEP] [--output {human,raw,jsonl}]
-                        [--timeout TIMEOUT] [--report REPORT]
+                        [--timeout TIMEOUT] [--scan]
+                        [--max-http-attempts MAX_HTTP_ATTEMPTS]
+                        [--max-elapsed-seconds MAX_ELAPSED_SECONDS]
+                        [--max-records MAX_RECORDS] [--report REPORT]
                         logql
 
 positional arguments:
@@ -35,13 +38,21 @@ options:
   --since SINCE         Relative duration such as 15m or 2h.
   --start START         RFC 3339 range start.
   --end END             RFC 3339 range end (default: now).
-  --limit LIMIT         Maximum log entries (1-5000; default: 100).
+  --limit LIMIT         Maximum entries per request (1-5000; default: 100,
+                        scan: 1000).
   --direction {backward,forward}
                         Log result direction (default: backward).
   --step STEP           Metric query step in Loki seconds or duration form.
   --output {human,raw,jsonl}
                         Output format (default: human).
   --timeout TIMEOUT     HTTP timeout in seconds (default: 30).
+  --scan                Scan consecutive intervals with bounded execution.
+  --max-http-attempts MAX_HTTP_ATTEMPTS
+                        Scan HTTP attempt budget (default: 60).
+  --max-elapsed-seconds MAX_ELAPSED_SECONDS
+                        Scan elapsed budget (default: 300).
+  --max-records MAX_RECORDS
+                        Scan retained record budget (default: 10000).
   --report REPORT       Write log completeness JSON to this file.
 
 $ loki-query config --help
