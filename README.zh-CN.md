@@ -181,6 +181,36 @@ series；原始条目包括损坏的记录及标签无效的 series 中的条目
 一个逻辑范围请求及原有重试，不会隐式扫描更多区间。`--report` 仅适用于日志查询；
 指标查询的行为和输出保持不变。
 
+## Trace 时间线
+
+必须显式选择 profile、单个 stream selector，以及相对或绝对时间边界：
+
+```bash
+loki-query trace --profile uat --selector '{namespace="apps",app=~"api|worker"}' \
+  --since 15m --report trace-report.json 'your-trace-id'
+```
+
+默认 JSON body 模式只检查顶层 `trace_id` 或 `traceId`，要求完整、区分大小写的
+**字符串**相等。CLI 使用原样 selector 获取候选记录，再在本地解析原始 JSON 并
+精确匹配，保留 selector 约束、原始日志及所有返回标签，包括与字段同名的标签。
+Trace ID 不会插入 LogQL。数字、字段缺失、非 JSON、重复 JSON 键和非标准 JSON
+常量都不确认匹配；这些正常的不匹配不计入 API 解析损失。不会回退到标签或全文
+匹配；独立的 `query` 仍支持调用者编写全文查询。`--selector` 后的 pipeline 或
+表达式会在联网前被拒绝。
+
+人类可读时间线按纳秒时间戳升序排列，默认用 `app` 展示服务，同时保留 namespace
+及所有返回标签。`--service-field NAME` 可指定其他返回标签，缺失时显示 `unknown`。
+相同时间戳按标签及文本确定显示顺序，不推断因果；真实重复记录仍重复保留。
+`--output raw` 保留原始文本，`--output jsonl` 保持现有 `log_entry` schema，
+不混入摘要行。
+
+命令执行一次有界逻辑请求（包含现有 HTTP 重试），默认 `--limit 100`、
+`--direction backward`；获取方向不改变时间线升序展示。完整性及 limit 饱和均按
+**原始候选记录**计算，即使没有候选匹配 ID。独立报告保留候选计数，增加
+`matched_records`、`filtered_candidates` 及精确 trace 身份。stderr 的无匹配提示
+限定为所选条件，并声明候选检索是否完整。仅饱和仍返回 0；API 解析损失保留有效
+证据并返回 4。完整检索及无匹配均不证明日志采集完整性或业务事件不存在。
+
 ## Skill
 
 仓库内显式调用的 `$loki-query` skill 位于

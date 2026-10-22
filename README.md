@@ -194,6 +194,43 @@ still issues one logical range request with existing retries; it never
 silently scans additional intervals. `--report` is log-only; metric behavior
 and output remain unchanged.
 
+## Trace timelines
+
+Use an explicitly selected profile, a single stream selector, and an explicit
+relative or absolute time boundary:
+
+```bash
+loki-query trace --profile uat --selector '{namespace="apps",app=~"api|worker"}' \
+  --since 15m --report trace-report.json 'your-trace-id'
+```
+
+The default JSON-body mode checks top-level `trace_id` or `traceId` for complete,
+case-sensitive **string** equality. It retrieves candidates using your unchanged
+selector, then checks the original JSON locally. This preserves selector
+constraints, log lines, and all returned labels, including colliding field names.
+The trace ID is never interpolated into LogQL. Numeric values, absent fields,
+non-JSON bodies, duplicate JSON keys, and nonstandard JSON constants are rejected;
+these expected nonmatches are not API parse losses. There is no label or full-text
+fallback. Generic `query` remains available for caller-authored full-text searches.
+A pipeline or expression after `--selector` is rejected before network access.
+
+The human timeline is ascending at nanosecond precision. It displays `app` as
+service and retains namespace and every returned label. Use `--service-field NAME`
+to choose another returned label; absent values display `unknown`. Equal timestamps
+have deterministic label/text ordering without implying causality, and repeated
+identical records remain repeated. `--output raw` preserves original lines;
+`--output jsonl` preserves the existing `log_entry` schema without summary rows.
+
+This command performs one bounded logical request (including existing HTTP
+retries), with `--limit 100` and `--direction backward` by default. Fetch direction
+does not change chronological presentation. Completeness and limit saturation
+are computed from **raw candidates**, even when zero candidates match the ID.
+The separate report retains candidate counts and adds `matched_records`,
+`filtered_candidates`, and the exact trace identity. Stderr qualifies any no-match
+result by the selected conditions and candidate completeness. Saturation alone
+keeps exit status 0; API parse losses retain evidence and return 4. Neither a
+complete retrieval nor no matches proves ingestion completeness or event absence.
+
 ## Skill
 
 The repository provides an explicitly invoked `$loki-query` skill at
