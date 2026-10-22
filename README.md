@@ -226,12 +226,12 @@ current-process count, not cumulative saved usage.
 
 ## Bounded interval scans
 
-Add `--scan` explicitly to scan a log-query range. The complete LogQL, profile,
+Add `--scan` explicitly to a log query or trace investigation. The complete LogQL, profile,
 and time scope are retained. Relative times are frozen once; RFC 3339 bounds
 preserve nanosecond precision, including sub-second ranges. The scan uses
 contiguous half-open intervals of at most 15 minutes, with a shorter final
 interval. Requests run serially, newest interval first by default or oldest
-first with `--direction forward`; displayed logs remain globally descending.
+first with `--direction forward`; generic logs display descending and trace timelines ascending.
 
 ```bash
 loki-query query --profile prod --since 1h --scan \
@@ -246,7 +246,7 @@ these using `--limit`, `--max-http-attempts`, `--max-elapsed-seconds`, and
 and `--max-records` require `--scan`; scan-only options reject metric queries
 before networking. `--max-http-attempts` also applies to ordinary queries and
 trace, as described above.
-Ordinary queries retain their default limit of 100 and existing behavior.
+Ordinary queries and trace lookups retain their default limit of 100 and existing behavior.
 
 The remaining elapsed allowance constrains every HTTP timeout. A retry wait
 that would consume the remaining allowance stops the scan without sleeping;
@@ -285,7 +285,8 @@ archives; an explicit `--report` writes only completeness metadata.
 
 ## Saved scan evidence and offline export
 
-Opt into durable progress and captured log evidence with `query --scan --work-dir`:
+Opt into durable progress and captured candidate evidence with `query --scan --work-dir`
+or `trace --scan --work-dir`:
 
 ```bash
 loki-query query --profile prod --since 1h --scan --work-dir incident-work \
@@ -311,7 +312,7 @@ is rejected rather than treated as a completed scan. The state file and lock are
 reserved and cannot be selected as a report destination.
 
 `export` requires no configuration, token or HTTP access. It reconstructs retained
-interval evidence in generic-query descending order, without combining parent
+interval evidence in generic-query descending order or trace ascending order, without combining parent
 and child observations or deduplicating genuine repeats. Its stderr summary and
 optional JSON report carry the saved coverage, gap reasons and usage; JSONL stays
 evidence-only. Partial scans still return 4, and saved authentication failures
@@ -335,8 +336,8 @@ Changed scope requires a new investigation; `resume` accepts no query, range or
 direction flags. Current credentials are loaded from the selected profile's
 current token environment variable, so both token values and the environment
 variable name can rotate without storing credentials. An already complete scan
-makes no requests and does not require a token. Generic log scans are supported;
-trace scan resume is introduced separately.
+makes no requests and does not require a token. Generic log and all trace source
+modes use the same scan engine and checkpoint validation.
 
 Each execution receives fresh request, elapsed and retained-record allowances.
 `--limit`, `--timeout`, execution budgets and output/report choices may change.
@@ -427,7 +428,7 @@ have deterministic label/text ordering without implying causality, and repeated
 identical records remain repeated. `--output raw` preserves original lines;
 `--output jsonl` preserves the existing `log_entry` schema without summary rows.
 
-This command performs one bounded logical request (including existing HTTP
+Without `--scan`, this command performs one bounded logical request (including existing HTTP
 retries), with `--limit 100` and `--direction backward` by default. Fetch direction
 does not change chronological presentation. Completeness and limit saturation
 are computed from **raw candidates**, even when zero candidates match the ID.
@@ -436,6 +437,48 @@ The separate report retains candidate counts and adds `matched_records`,
 result by the selected conditions and candidate completeness. Saturation alone
 keeps exit status 0; API parse losses retain evidence and return 4. Neither a
 complete retrieval nor no matches proves ingestion completeness or event absence.
+
+### Scan, save, resume and export a timeline
+
+Every trace source supports the same opt-in `--scan`: default JSON fields, custom
+literal fields/JSON Pointers, and explicit labels. The shared engine handles
+15-minute intervals, adaptive subdivision, retries, coverage and all budgets.
+Its default request limit is 1000; a trace lookup without scanning stays at 100.
+Fetch direction never changes ascending human, raw or JSONL presentation.
+
+```bash
+loki-query trace --profile uat --selector '{namespace="apps",app=~"api|worker"}' \
+  --since 30m --scan --work-dir trace-work --max-http-attempts 20 \
+  --max-records 2000 --output jsonl --report trace-scan.json 'your-trace-id'
+loki-query resume --profile uat --work-dir trace-work --trace-id 'your-trace-id' \
+  --max-http-attempts 10 --service-field service_name --output human
+loki-query export --work-dir trace-work --output jsonl --report trace-export.json
+```
+
+Trace checkpoints retain original **candidate** lines and labels, the exact ID,
+source, original selector, canonical field mapping and actual server query.
+Coverage, saturation, subdivision and record allowances use candidates before
+local matching: even zero confirmed matches can exhaust the record budget and
+leave an incomplete timeline. Reports distinguish cumulative network observations,
+retained candidates and matched records; rejected trace predicates are not API
+parse losses. Parent-to-child sample replacement preserves genuine duplicates.
+
+Resume validates trace identity and query consistency before token lookup or
+HTTP; export performs the same semantic validation without configuration or
+credentials. Resume accepts optional `--trace-id`, `--source`, `--selector`,
+`--field` and `--path` assertions; they must match the frozen investigation.
+Equivalent canonical mappings may reorder or repeat fields. Changing the ID,
+source, selector or mapping requires a new work directory. Output format,
+`--service-field`, timeout and execution budgets may change. Only unresolved
+intervals are fetched; completed evidence remains frozen. Every checkpoint,
+including an interrupted first request, carries the trace identity and coverage.
+
+Offline export applies the saved predicate to saved candidates and displays the
+same chronological evidence, including repeated rows and original labels/lines.
+An incomplete archive remains incomplete on export. A complete selected-range
+retrieval only establishes the matching subset of those observed candidates;
+it does not establish a full request lifecycle, causality, ingestion completeness
+or a server snapshot. Later arrivals require a fresh investigation.
 
 ## Skill
 

@@ -151,6 +151,8 @@ def _decode(payload: Any) -> tuple[dict[str, Any], ScanOutcome]:
     if payload['schema_version'] != 1:
         raise ValueError('unsupported state version')
     identity, report = payload['identity'], payload['report']
+    from .trace import validate_saved_trace
+    validate_saved_trace(identity, report)
     if identity['result_schema'] != 'log_entry/v1' or identity['query_type'] != 'log':
         raise ValueError('unsupported result schema')
     for key in ('query_type', 'profile', 'target', 'query', 'start_ns', 'end_ns', 'direction'):
@@ -214,6 +216,11 @@ def _decode(payload: Any) -> tuple[dict[str, Any], ScanOutcome]:
     combined = QueryResult('log', sorted(records_combined, key=lambda record: record.timestamp_ns, reverse=True),
                            ParseSummary(_integer(counts['skipped_series'], minimum=0), _integer(counts['skipped_entries'], minimum=0)),
                            _integer(counts['raw_entries'], minimum=len(records_combined)), counts['raw_count_exact'])
+    if 'trace' in identity:
+        from .trace import trace_matches
+        matches = trace_matches(combined, identity['trace'])
+        if counts.get('matched_records') != len(matches.records) or counts.get('filtered_candidates') != len(combined.records) - len(matches.records):
+            raise ValueError('inconsistent trace match counts')
     coverage = report['coverage']
     for category, expected in (('resolved', [i for i in intervals if not i.reasons]),
                                ('unresolved', [i for i in intervals if i.reasons])):

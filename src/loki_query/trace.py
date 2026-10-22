@@ -12,6 +12,8 @@ from urllib.request import Request
 from .client import AuthenticationError, HttpAttemptBudgetError, LogEntry, Opener, QueryError, QueryResult, ReadableResponse, Sleeper, query_range
 from .config import ConfigurationError, load_config
 from .output import format_timestamp_utc, write_result
+from .persistence import WorkDirectory
+from .scanning import ScanOptions, ScanOutcome, scan_range
 from .reporting import log_report, validate_report_destination, write_log_report
 from .time_range import resolve_time_range
 
@@ -40,7 +42,7 @@ def configure_trace_parser(
     ranges.add_argument('--since', help='Relative duration such as 15m.')
     ranges.add_argument('--start', help='RFC 3339 range start.')
     parser.add_argument('--end', help='RFC 3339 range end (default: now).')
-    parser.add_argument('--limit', type=limit_type, default=100, help='Maximum candidates (1-5000; default: 100).')
+    parser.add_argument('--limit', type=limit_type, help='Maximum candidates per request (1-5000; default: 100, scan: 1000).')
     parser.add_argument('--direction', choices=('backward', 'forward'), default='backward')
     parser.add_argument('--output', choices=('human', 'raw', 'jsonl'), default='human')
     parser.add_argument('--service-field', default='app', help='Returned service label (default: app).')
@@ -51,6 +53,10 @@ def configure_trace_parser(
     parser.add_argument('--timeout', type=timeout_type, default=30.0)
     parser.add_argument('--max-http-attempts', type=budget_type,
                         help='HTTP attempt ceiling including retries; explicit cap emits stderr accounting.')
+    parser.add_argument('--scan', action='store_true', help='Use the shared bounded adaptive scan engine.')
+    parser.add_argument('--max-elapsed-seconds', type=timeout_type, help='Scan elapsed budget (default: 300).')
+    parser.add_argument('--max-records', type=budget_type, help='Scan retained candidate budget (default: 10000).')
+    parser.add_argument('--work-dir', help='Persist trace scan candidates and progress in this directory.')
     parser.add_argument('--report', help='Write trace completeness JSON to this file.')
 
 
@@ -169,6 +175,84 @@ def write_trace_result(result: QueryResult, output_format: str, stream: TextIO, 
             print(f'{format_timestamp_utc(record.timestamp_ns)} service={service} namespace={namespace} '
                   f'{labels} {record.line}', file=stream)
 
+def trace_metadata(trace_id: str, source: str, selector: str, fields: list[str], paths: list[str],
+                   mapping: tuple[tuple[str, ...], ...]) -> dict[str, Any]:
+    return {'id': trace_id, 'source': source, 'fields': fields, 'selector': selector,
+            'paths': paths, 'mapping': [list(path) for path in sorted(mapping)],
+            'matching': ('server label filter and local exact returned-label matching' if source == 'label'
+                         else 'local exact JSON string matching on selector candidates')}
+
+
+def trace_matches(result: QueryResult, metadata: dict[str, Any]) -> QueryResult:
+    return (matched_labels(result, metadata['id'], metadata['fields']) if metadata['source'] == 'label'
+            else matched_trace(result, metadata['id'], tuple(tuple(path) for path in metadata['mapping'])))
+
+
+def annotate_trace(outcome: ScanOutcome, metadata: dict[str, Any]) -> ScanOutcome:
+    matches = trace_matches(outcome.result, metadata)
+    outcome.report['trace'] = metadata
+    outcome.report['counts']['matched_records'] = len(matches.records)
+    outcome.report['counts']['filtered_candidates'] = len(outcome.result.records) - len(matches.records)
+    return outcome
+
+
+def write_trace_outcome(outcome: ScanOutcome, args: argparse.Namespace, stdout: TextIO, stderr: TextIO,
+                        *, token: str) -> int:
+    metadata = outcome.report['trace']
+    matches = trace_matches(outcome.result, metadata)
+    write_trace_result(matches, args.output, stdout, service_field=args.service_field)
+    print('Trace timeline: equal timestamps do not imply causality.', file=stderr)
+    print(f'Trace candidates: {len(outcome.result.records)} examined, {len(matches.records)} matched.', file=stderr)
+    if not matches.records:
+        print(f"No trace matches under the selected conditions; candidate retrieval is {outcome.report['status']}.", file=stderr)
+    write_log_report(outcome.report, args.report, stderr, token=token)
+    return outcome.exit_code
+
+
+def validate_saved_trace(identity: dict[str, Any], report: dict[str, Any]) -> None:
+    """Validate frozen semantics before a checkpoint can be resumed or exported."""
+    metadata = identity.get('trace')
+    if metadata is None:
+        if 'trace' in identity or 'trace' in report:
+            raise ValueError('missing trace identity')
+        return
+    if not isinstance(metadata, dict) or metadata != report.get('trace'):
+        raise ValueError('inconsistent trace identity')
+    trace_id, source, selector = metadata['id'], metadata['source'], metadata['selector']
+    fields, paths = metadata['fields'], metadata['paths']
+    if (not isinstance(trace_id, str) or not trace_id or source not in ('json', 'label')
+            or not isinstance(selector, str) or not isinstance(fields, list) or not isinstance(paths, list)
+            or any(not isinstance(value, str) for value in fields + paths)
+            or fields != sorted(set(fields)) or paths != sorted(set(paths))):
+        raise ValueError('invalid trace identity')
+    try:
+        validate_selector(selector)
+        mapping = resolve_json_mapping(fields, paths)
+        query = label_query(selector, trace_id, fields, paths) if source == 'label' else selector
+    except ConfigurationError as error:
+        raise ValueError('invalid saved trace semantics') from error
+    if not mapping or metadata != trace_metadata(trace_id, source, selector, fields, paths, mapping) or identity['query'] != query:
+        raise ValueError('inconsistent trace query or mapping')
+
+
+def validate_trace_resume(args: argparse.Namespace, metadata: dict[str, Any] | None) -> None:
+    supplied = any(getattr(args, key) is not None for key in ('trace_id', 'source', 'selector', 'fields', 'paths'))
+    if metadata is None:
+        if supplied:
+            raise ConfigurationError('Trace identity options require a saved trace investigation.')
+        return
+    for key, saved_key in (('trace_id', 'id'), ('source', 'source'), ('selector', 'selector')):
+        value = getattr(args, key)
+        if value is not None and value != metadata[saved_key]:
+            raise ConfigurationError('Saved trace identity does not match; use a fresh investigation for changed scope.')
+    if args.fields is not None or args.paths is not None:
+        if metadata['source'] == 'label':
+            label_query(metadata['selector'], metadata['id'], args.fields, args.paths)
+        mapping = [list(path) for path in sorted(resolve_json_mapping(args.fields, args.paths))]
+        if mapping != metadata['mapping']:
+            raise ConfigurationError('Saved trace field mapping does not match; use a fresh investigation for changed scope.')
+
+
 def run_trace(
     args: argparse.Namespace, *, config_path: Path, environment: Mapping[str, str],
     stdout: TextIO, stderr: TextIO, opener: Opener, sleeper: Sleeper,
@@ -176,6 +260,11 @@ def run_trace(
 ) -> int:
     if args.end and not args.start:
         raise ConfigurationError('--end requires --start and cannot be combined with --since.')
+    scan_flags = [flag for flag, value in (('--max-elapsed-seconds', args.max_elapsed_seconds),
+                  ('--max-records', args.max_records), ('--work-dir', args.work_dir)) if value is not None]
+    if scan_flags and not args.scan:
+        raise ConfigurationError(f"{', '.join(scan_flags)} requires --scan.")
+    args.limit = args.limit or (1000 if args.scan else 100)
     validate_selector(args.selector)
     if not args.trace_id or not args.service_field.strip():
         raise ConfigurationError("Trace ID and service field must not be empty.")
@@ -183,7 +272,7 @@ def run_trace(
     query = (label_query(args.selector, args.trace_id, label_fields, args.paths)
              if args.source == 'label' else args.selector)
     mapping = resolve_json_mapping(args.fields, args.paths)
-    fields = sorted(set(args.fields or [])) if args.fields is not None or args.paths is not None else ['trace_id', 'traceId']
+    fields = sorted(set(args.fields or [])) if args.fields is not None or args.paths is not None else ['traceId', 'trace_id']
     paths = sorted(set(args.paths or []))
     validate_report_destination(args.report)
     config = load_config(config_path)
@@ -194,6 +283,34 @@ def run_trace(
     if not token:
         raise AuthenticationError(f'token environment variable {profile.token_env!r} is not set.')
     start_ns, end_ns = resolve_time_range(since=args.since, start=args.start, end=args.end, now=now)
+    metadata = trace_metadata(args.trace_id, args.source, args.selector, fields, paths, mapping)
+    if args.scan:
+        identity: dict[str, Any] | None = None
+        def execute_scan(work: WorkDirectory | None = None) -> ScanOutcome:
+            def progress(outcome: ScanOutcome) -> None:
+                nonlocal identity
+                annotate_trace(outcome, metadata)
+                if work is not None:
+                    if identity is None:
+                        identity = {key: outcome.report[key] for key in
+                            ('query_type', 'profile', 'target', 'query', 'start_ns', 'end_ns', 'direction')}
+                        identity.update({'result_schema': 'log_entry/v1', 'trace': metadata})
+                    work.save(outcome, identity=identity)
+            outcome = scan_range(profile=profile, token=token, query=query, start_ns=start_ns, end_ns=end_ns,
+                direction=args.direction, options=ScanOptions(limit=args.limit,
+                    max_http_attempts=args.max_http_attempts or 60,
+                    max_elapsed_seconds=args.max_elapsed_seconds or 300.0,
+                    max_records=args.max_records or 10000, timeout=args.timeout),
+                opener=opener, sleeper=sleeper, monotonic=monotonic, progress=progress)
+            return annotate_trace(outcome, metadata)
+        if args.work_dir is not None:
+            with WorkDirectory(args.work_dir).writer() as work:
+                work.validate_report(args.report)
+                work.require_new()
+                outcome = execute_scan(work)
+        else:
+            outcome = execute_scan()
+        return write_trace_outcome(outcome, args, stdout, stderr, token=token)
     started, attempts = monotonic(), 0
 
     def counted_opener(request: Request, timeout: float) -> ReadableResponse:
@@ -206,11 +323,7 @@ def run_trace(
                             direction=args.direction, limit=args.limit, result=result, attempts=attempts,
                             elapsed_seconds=max(0.0, monotonic() - started), timeout=args.timeout,
                             failure_reason=reason, max_http_attempts=min(3, args.max_http_attempts or 3))
-        report['trace'] = {'id': args.trace_id, 'source': args.source, 'fields': fields, 'selector': args.selector,
-                           'paths': paths, 'mapping': [list(path) for path in sorted(mapping)],
-                           'matching': ('server label filter and local exact returned-label matching'
-                                        if args.source == 'label' else
-                                        'local exact JSON string matching on selector candidates')}
+        report['trace'] = metadata
         report['counts']['matched_records'] = len(matches.records) if matches else 0
         report['counts']['filtered_candidates'] = len(result.records) - len(matches.records) if result and matches else 0
         return report
