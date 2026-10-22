@@ -265,11 +265,52 @@ The default JSON-body mode checks top-level `trace_id` or `traceId` for complete
 case-sensitive **string** equality. It retrieves candidates using your unchanged
 selector, then checks the original JSON locally. This preserves selector
 constraints, log lines, and all returned labels, including colliding field names.
-The trace ID is never interpolated into LogQL. Numeric values, absent fields,
+In JSON-body mode the trace ID is never interpolated into LogQL. Numeric values, absent fields,
 non-JSON bodies, duplicate JSON keys, and nonstandard JSON constants are rejected;
 these expected nonmatches are not API parse losses. There is no label or full-text
 fallback. Generic `query` remains available for caller-authored full-text searches.
 A pipeline or expression after `--selector` is rejected before network access.
+
+In JSON-body mode, use repeated `--field NAME` for literal top-level JSON keys, or repeated
+`--path POINTER` for nested JSON object members. The combined custom list
+**replaces** both defaults; any selected field/path may match. For example:
+
+```bash
+loki-query trace --profile uat --selector '{namespace="apps",app="api"}' \
+  --since 15m --field 'trace.id' --path '/context/traceId' 'your-trace-id'
+```
+
+Here `trace.id` is one literal key, while `/context/traceId` traverses two object
+members. Paths use JSON Pointer escaping: `~1` means `/`, and `~0` means `~`;
+`/a~1b/~0key` selects the member `~key` inside `a/b`. Members must be nonempty
+and contain no control characters. Empty names, invalid escapes and paths
+without an initial `/` are rejected before network access. Paths traverse
+objects only; there is no array indexing, wildcard, dotted-path, or JSONPath
+interpretation. Literal field names may contain punctuation, quotes and spaces,
+but must be nonempty and contain no control characters. All names and IDs remain
+local data rather than generated LogQL. Missing/non-string values never fall
+back to defaults. Reports include selected `fields`, `paths`, and a sorted,
+deduplicated `mapping` of decoded object-member components for query identity.
+
+Select label matching explicitly when the ID is stored in returned labels rather
+than the body. Label mode requires one or more explicit `--field` names:
+
+```bash
+loki-query trace --profile uat --selector '{namespace="apps",app=~"api|worker"}' \
+  --since 15m --source label --field trace_id --field correlation_id 'your-trace-id'
+```
+
+`--source json` is the default; each query uses only its selected source. Label
+mode checks complete, case-sensitive label strings, including structured metadata
+exposed in the normal returned label map. It appends an exact OR label filter to
+your selector with safely quoted IDs, then checks the returned labels locally.
+Field names must be ASCII identifiers (`[A-Za-z_][A-Za-z0-9_]*`); JSON `--path`
+options are rejected before network access. The body need not contain the ID or
+even be JSON. No JSON-body fallback or source union occurs. Original lines and
+labels remain intact, and the report records source, fields, canonical mapping,
+original selector, and generated query. Field order and duplicates do not change
+the label investigation identity. Missing or conflicting body values cannot
+confirm a label match. Categorized-label response formats are not enabled.
 
 The human timeline is ascending at nanosecond precision. It displays `app` as
 service and retains namespace and every returned label. Use `--service-field NAME`
