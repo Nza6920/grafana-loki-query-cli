@@ -47,7 +47,8 @@ options:
   --output {human,raw,jsonl}
                         Output format (default: human).
   --timeout TIMEOUT     HTTP timeout in seconds (default: 30).
-  --scan                Scan consecutive intervals with bounded execution.
+  --scan                Adaptively scan dense or timed-out intervals with
+                        bounded execution.
   --max-http-attempts MAX_HTTP_ATTEMPTS
                         Scan HTTP attempt budget (default: 60).
   --max-elapsed-seconds MAX_ELAPSED_SECONDS

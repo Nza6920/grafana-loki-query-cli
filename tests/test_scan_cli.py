@@ -89,10 +89,10 @@ class ScanCliTests(unittest.TestCase):
 
     def test_partial_parsing_and_raw_saturation_preserve_evidence_and_independent_progress(self) -> None:
         first = [{'stream': {}, 'values': [['1800000000001', 'valid'], ['bad', 'lost']]}]
-        self.assertEqual(self.invoke([first, [], []], '--limit', '2'), 4)
+        self.assertEqual(self.invoke([first, [], []], '--limit', '2', '--end', '1970-01-01T00:30:01Z'), 4)
         report = self.read_report()
         self.assertEqual(len(report['coverage']['resolved']), 2)
-        self.assertEqual(report['coverage']['unresolved'][0]['reasons'], ['possible_truncation', 'parse_loss'])
+        self.assertEqual(report['coverage']['unresolved'][0]['reasons'], ['possible_truncation', 'parse_loss', 'minimum_interval'])
         self.assertEqual(report['counts']['raw_entries'], 2)
         self.assertEqual(report['counts']['valid_records'], 1)
         self.assertEqual(json.loads(self.stdout.getvalue())['line'], 'valid')
@@ -144,10 +144,10 @@ class ScanCliTests(unittest.TestCase):
                 self.assertEqual(self.read_report()['status'], 'failed')
                 self.assertNotIn('secret', self.report.read_text() + self.stderr.getvalue())
 
-    def test_timeout_becomes_gap_and_independent_intervals_continue(self) -> None:
-        self.assertEqual(self.invoke([TimeoutError(), [], []]), 4)
+    def test_minimum_timeout_gap_allows_independent_intervals_to_continue(self) -> None:
+        self.assertEqual(self.invoke([TimeoutError(), [], []], '--end', '1970-01-01T00:30:01Z'), 4)
         self.assertEqual(len(self.requests), 3)
-        self.assertEqual(self.read_report()['coverage']['unresolved'][0]['reasons'], ['timeout'])
+        self.assertEqual(self.read_report()['coverage']['unresolved'][0]['reasons'], ['timeout', 'minimum_interval'])
 
     def test_scan_flags_require_log_mode_and_finite_positive_budgets_before_network(self) -> None:
         for flags in (('--query-type', 'metric'), ('--max-http-attempts', '0'),
@@ -213,3 +213,137 @@ class ScanCliTests(unittest.TestCase):
                 error = HTTPError('https://grafana.example.com', 429, 'limited', headers, None)
                 self.assertEqual(self.invoke([error, *responses]), expected_code)
                 self.assertEqual(self.sleeps, [] if retry_after == 'inf' else [0.0])
+
+    def test_dense_odd_nanosecond_range_replaces_parent_and_keeps_multiplicity(self) -> None:
+        parent = [{'stream': {'app': 'api'}, 'values': [
+            ['1', 'same'], ['1', 'same'], ['2000000000', 'boundary'], ['4000000000', 'end']]}]
+        newer = [{'stream': {'app': 'api'}, 'values': [
+            ['2000000000', 'boundary'], ['4000000000', 'end']]},
+            {'stream': {'app': 'worker'}, 'values': [['2000000000', 'boundary']]}]
+        older = [{'stream': {'app': 'api'}, 'values': [['1', 'same'], ['1', 'same']]}]
+        self.assertEqual(self.invoke([parent, newer, older], '--start', '1970-01-01T00:00:00Z',
+            '--end', '1970-01-01T00:00:04.000000001Z', '--limit', '4', '--max-records', '6'),
+            0, self.stderr.getvalue())
+        self.assertEqual([(r['start'][0], r['end'][0], r['limit'][0]) for r in self.requests],
+            [('0', '4000000001', '4'), ('2000000000', '4000000001', '4'), ('0', '2000000000', '3')])
+        rows = [json.loads(line) for line in self.stdout.getvalue().splitlines()]
+        self.assertEqual([r['line'] for r in rows], ['end', 'boundary', 'boundary', 'same', 'same'])
+        self.assertEqual({r['labels']['app'] for r in rows if r['line'] == 'boundary'}, {'api', 'worker'})
+        report = self.read_report()
+        self.assertEqual(report['counts']['raw_entries'], 9)
+        self.assertEqual(report['counts']['valid_records'], 5)
+        self.assertEqual(report['usage']['current']['http_attempts'], 3)
+        self.assertEqual(len(report['coverage']['resolved']), 2)
+
+    def test_timeout_splits_until_one_second_then_keeps_exact_gap(self) -> None:
+        self.assertEqual(self.invoke([TimeoutError(), TimeoutError(), []],
+            '--end', '1970-01-01T00:00:02Z'), 4)
+        self.assertEqual([(r['start'][0], r['end'][0]) for r in self.requests],
+            [('0', '2000000000'), ('1000000000', '2000000000'), ('0', '1000000000')])
+        report = self.read_report()
+        self.assertEqual(report['coverage']['unresolved'][0]['reasons'], ['timeout', 'minimum_interval'])
+        self.assertEqual(report['coverage']['resolved'][0]['start_ns'], '0')
+        self.assertEqual(report['usage']['current']['http_attempts'], 3)
+        self.assertEqual(len(report['requests']), 3)
+
+    def test_parse_lost_child_retains_stronger_parent_sample_for_its_range(self) -> None:
+        parent = [{'stream': {}, 'values': [['1', 'old'], ['2500000000', 'middle'], ['3500000000', 'new']]}]
+        child = [{'stream': {}, 'values': [['bad', 'lost']]}]
+        self.assertEqual(self.invoke([parent, child], '--limit', '3', '--max-http-attempts', '2',
+            '--end', '1970-01-01T00:00:04Z'), 4)
+        self.assertEqual([json.loads(line)['line'] for line in self.stdout.getvalue().splitlines()],
+            ['new', 'middle', 'old'])
+        report = self.read_report()
+        self.assertEqual(report['counts']['raw_entries'], 4)
+        self.assertEqual(report['counts']['valid_records'], 3)
+        self.assertEqual(report['counts']['skipped_entries'], 1)
+        self.assertEqual(report['coverage']['unresolved'][0]['reasons'], ['parse_loss'])
+        self.assertEqual(report['stop_reasons'], ['http_attempt_budget'])
+
+    def test_budget_stop_after_resolved_child_keeps_only_unresolved_parent_range(self) -> None:
+        for flags, cost, reason in [
+            (('--max-http-attempts', '2'), 0.0, 'http_attempt_budget'),
+            (('--max-elapsed-seconds', '1'), 0.5, 'elapsed_time_budget'),
+        ]:
+            with self.subTest(reason=reason):
+                self.requests.clear()
+                self.stdout.seek(0)
+                self.stdout.truncate()
+                self.clock = 0.0
+                self.cost = cost
+                parent = [{'stream': {}, 'values': [['1', 'same'], ['1', 'same'],
+                    ['2500000000', 'stale'], ['3500000000', 'stale']]}]
+                child = [{'stream': {}, 'values': [['3000000000', 'fresh']]}]
+                self.assertEqual(self.invoke([parent, child], '--limit', '4', '--max-records', '4',
+                    '--end', '1970-01-01T00:00:04Z', *flags), 4)
+                self.assertEqual([json.loads(line)['line'] for line in self.stdout.getvalue().splitlines()],
+                    ['fresh', 'same', 'same'])
+                report = self.read_report()
+                self.assertEqual(report['stop_reasons'], [reason])
+                self.assertEqual(report['counts']['raw_entries'], 5)
+                self.assertEqual(report['counts']['valid_records'], 3)
+                self.assertEqual(report['coverage']['resolved'][0]['retained_records'], 1)
+                gap = report['coverage']['unresolved'][0]
+                self.assertEqual((gap['start_ns'], gap['end_ns'], gap['retained_records']), ('0', '2000000000', 2))
+                self.assertEqual(gap['sample_origin'], {'start_ns': '0', 'end_ns': '4000000000'})
+                self.assertEqual(gap['reasons'], ['unqueried', 'possible_truncation', reason])
+                self.assertEqual(len(self.requests), 2)
+
+    def test_raw_saturation_splits_even_when_parse_loss_hides_valid_count(self) -> None:
+        parent = [{'stream': {}, 'values': [['1', 'partial'], ['bad', 'lost']]}]
+        self.assertEqual(self.invoke([parent, [], []], '--limit', '2',
+            '--end', '1970-01-01T00:00:04Z'), 0, self.stderr.getvalue())
+        self.assertEqual(len(self.requests), 3)
+        self.assertEqual(self.stdout.getvalue(), '')
+        report = self.read_report()
+        self.assertEqual(report['counts']['raw_entries'], 2)
+        self.assertEqual(report['counts']['valid_records'], 0)
+        self.assertEqual(report['counts']['skipped_entries'], 1)
+        self.assertEqual(report['status'], 'complete')
+        self.assertEqual(report['coverage']['unresolved'], [])
+
+    def test_saturated_subsecond_range_stops_with_precise_minimum_gap(self) -> None:
+        sample = [{'stream': {}, 'values': [['1', 'burst']]}]
+        self.assertEqual(self.invoke([sample], '--limit', '1',
+            '--end', '1970-01-01T00:00:00.000000009Z'), 4)
+        self.assertEqual(len(self.requests), 1)
+        gap = self.read_report()['coverage']['unresolved'][0]
+        self.assertEqual((gap['start_ns'], gap['end_ns']), ('0', '9'))
+        self.assertEqual(gap['reasons'], ['possible_truncation', 'minimum_interval'])
+        self.assertEqual(gap['retained_records'], 1)
+        self.assertEqual(json.loads(self.stdout.getvalue())['line'], 'burst')
+
+    def test_full_record_budget_retains_sample_and_stops_before_empty_priority_child(self) -> None:
+        parent = [{'stream': {}, 'values': [['1', 'same'], ['1', 'same'], ['2', 'same'], ['3', 'same']]}]
+        self.assertEqual(self.invoke([parent], '--limit', '4', '--max-records', '4',
+            '--end', '1970-01-01T00:00:04Z'), 4)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(len(self.stdout.getvalue().splitlines()), 4)
+        report = self.read_report()
+        self.assertEqual(report['stop_reasons'], ['record_budget'])
+        self.assertEqual([gap['retained_records'] for gap in report['coverage']['unresolved']], [0, 4])
+        self.assertTrue(all('record_budget' in gap['reasons'] for gap in report['coverage']['unresolved']))
+
+    def test_failed_child_keeps_inherited_sample_while_sibling_resolves(self) -> None:
+        parent = [{'stream': {}, 'values': [['1', 'replace'], ['2500000000', 'keep'], ['3500000000', 'keep']]}]
+        failure = HTTPError('https://grafana.example.com', 500, 'temporary', Message(), None)
+        older = [{'stream': {}, 'values': [['2', 'fresh']]}]
+        self.assertEqual(self.invoke([parent, failure, older], '--limit', '3',
+            '--end', '1970-01-01T00:00:04Z'), 4)
+        self.assertEqual([json.loads(line)['line'] for line in self.stdout.getvalue().splitlines()],
+            ['keep', 'keep', 'fresh'])
+        report = self.read_report()
+        self.assertEqual(report['coverage']['unresolved'][0]['reasons'], ['request_failed'])
+        self.assertEqual(report['coverage']['unresolved'][0]['retained_records'], 2)
+        self.assertEqual(len(report['coverage']['resolved']), 1)
+        self.assertEqual(report['stop_reasons'], [])
+
+    def test_forward_subdivision_prioritizes_oldest_exact_child(self) -> None:
+        parent = [{'stream': {}, 'values': [['1', 'replace'], ['2000000000', 'replace']]}]
+        older = [{'stream': {}, 'values': [['2', 'old']]}]
+        newer = [{'stream': {}, 'values': [['3000000000', 'new']]}]
+        self.assertEqual(self.invoke([parent, older, newer], '--limit', '2', '--direction', 'forward',
+            '--end', '1970-01-01T00:00:04.000000001Z'), 0)
+        self.assertEqual([(r['start'][0], r['end'][0]) for r in self.requests],
+            [('0', '4000000001'), ('0', '2000000000'), ('2000000000', '4000000001')])
+        self.assertEqual([json.loads(line)['line'] for line in self.stdout.getvalue().splitlines()], ['new', 'old'])
