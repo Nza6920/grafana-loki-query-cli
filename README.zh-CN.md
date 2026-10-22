@@ -443,6 +443,6 @@ python -m mypy
 
 Windows PowerShell 使用 `.venv\Scripts\Activate.ps1` 激活虚拟环境。Mypy 使用
 `pyproject.toml` 中固定的版本和配置严格检查 `src` 与 `tests`。GitHub Actions
-在推送和 pull request 时使用 Python 3.11 运行同一检查。
+在推送和 pull request 时使用 Python 3.11 运行单元测试、编译检查及同一严格类型检查。
 
 生产 smoke test 应使用临时配置、最近 15 分钟和 `limit=1`；验证报告只记录请求是否成功及结果条数，不复述日志正文。

@@ -527,7 +527,7 @@ python -m mypy
 
 On Windows PowerShell, activate the environment with `.venv\Scripts\Activate.ps1`.
 Mypy strictly checks `src` and `tests` using the pinned version and configuration
-in `pyproject.toml`. GitHub Actions runs the same check on pushes and pull requests
-using Python 3.11.
+in `pyproject.toml`. GitHub Actions runs the unit tests, compilation checks and
+the same strict type check on pushes and pull requests using Python 3.11.
 
 A production smoke test should use a temporary configuration, the last 15 minutes, and `limit=1`. Its report should record only whether the request succeeded and the number of results, without reproducing log content.
