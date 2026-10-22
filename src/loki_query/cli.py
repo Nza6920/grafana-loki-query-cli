@@ -26,6 +26,7 @@ from .output import write_result
 from .reporting import log_report, validate_report_destination, write_log_report
 from .scanning import ScanOptions, scan_range
 from .time_range import TimeRangeError, resolve_time_range
+from .trace import configure_trace_parser, run_trace
 
 
 EXIT_CONFIG = 2
@@ -150,6 +151,10 @@ def build_parser(
     query_parser.add_argument("--max-records", type=_positive_int, help="Scan retained record budget (default: 10000).")
     query_parser.add_argument("--report", help="Write log completeness JSON to this file.")
     query_parser.add_argument("logql", help="Complete LogQL query, or - to read stdin.")
+    configure_trace_parser(
+        subparsers.add_parser("trace", help="Query exact JSON trace IDs and show a timeline."),
+        limit_type=_limit, timeout_type=_positive_float,
+    )
     profiles_parser = subparsers.add_parser(
         "profiles", help="Inspect configured profiles."
     )
@@ -281,6 +286,10 @@ def _dispatch(
         config = load_config(selected_config_path)
         for profile_name in sorted(config.profiles):
             print(profile_name, file=output_stream)
+    elif args.command == "trace":
+        return run_trace(args, config_path=selected_config_path, environment=environment,
+                         stdout=output_stream, stderr=error_stream, opener=opener,
+                         sleeper=sleeper, now=now, monotonic=monotonic)
     elif args.command == "query":
         if args.end and not args.start:
             raise ConfigurationError(
