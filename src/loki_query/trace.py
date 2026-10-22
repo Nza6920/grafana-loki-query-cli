@@ -200,13 +200,20 @@ def write_trace_outcome(outcome: ScanOutcome, args: argparse.Namespace, stdout: 
                         *, token: str) -> int:
     metadata = outcome.report['trace']
     matches = trace_matches(outcome.result, metadata)
+    return _write_trace_presentation(outcome.result, matches, outcome.report, args, stdout, stderr,
+                                     token=token, exit_code=outcome.exit_code)
+
+
+def _write_trace_presentation(result: QueryResult, matches: QueryResult, report: dict[str, Any],
+                              args: argparse.Namespace, stdout: TextIO, stderr: TextIO,
+                              *, token: str, exit_code: int) -> int:
     write_trace_result(matches, args.output, stdout, service_field=args.service_field)
     print('Trace timeline: equal timestamps do not imply causality.', file=stderr)
-    print(f'Trace candidates: {len(outcome.result.records)} examined, {len(matches.records)} matched.', file=stderr)
+    print(f'Trace candidates: {len(result.records)} examined, {len(matches.records)} matched.', file=stderr)
     if not matches.records:
-        print(f"No trace matches under the selected conditions; candidate retrieval is {outcome.report['status']}.", file=stderr)
-    write_log_report(outcome.report, args.report, stderr, token=token)
-    return outcome.exit_code
+        print(f"No trace matches under the selected conditions; candidate retrieval is {report['status']}.", file=stderr)
+    write_log_report(report, args.report, stderr, token=token)
+    return exit_code
 
 
 def validate_saved_trace(identity: dict[str, Any], report: dict[str, Any]) -> None:
@@ -338,11 +345,6 @@ def run_trace(
         raise
     matches = (matched_labels(result, args.trace_id, label_fields) if args.source == 'label'
                else matched_trace(result, args.trace_id, mapping))
-    write_trace_result(matches, args.output, stdout, service_field=args.service_field)
-    print("Trace timeline: equal timestamps do not imply causality.", file=stderr)
     report = report_for(result, matches)
-    print(f"Trace candidates: {len(result.records)} examined, {len(matches.records)} matched.", file=stderr)
-    if not matches.records:
-        print(f"No trace matches under the selected conditions; candidate retrieval is {report['status']}.", file=stderr)
-    write_log_report(report, args.report, stderr, token=token)
-    return 4 if result.skipped.incomplete else 0
+    return _write_trace_presentation(result, matches, report, args, stdout, stderr,
+                                     token=token, exit_code=4 if result.skipped.incomplete else 0)

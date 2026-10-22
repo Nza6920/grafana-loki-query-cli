@@ -269,8 +269,9 @@ valid evidence and allow independent intervals to continue.
 
 A resolved child replaces only its own portion of the parent sample. Unqueried
 or failed children keep usable inherited records, and incomplete replacements
-keep the single sample with more valid records rather than combining observations. Genuine
-identical records remain separate. Replacement reuses the record capacity
+within the same execution keep the single sample with more valid records rather
+than combining observations. Genuine identical records remain separate.
+Replacement reuses the record capacity
 occupied by that interval, so parent and child network results do not count
 twice against the retained-record budget. Coverage includes `retained_records`
 and `sample_origin`; `requests` records queried parent and child bounds,
@@ -351,10 +352,10 @@ A reserved HTTP attempt is checkpointed before dispatch and conservatively count
 if the process stops before the response. Repeated checkpoints never re-add an
 execution's usage to cumulative totals.
 
-A new response replaces the unresolved interval's selected sample; a complete
-empty response removes its old rows. Failed requests preserve saved evidence,
-and a weaker incomplete response can retain a stronger prior sample while its
-gap remains explicit. Completed intervals stay frozen and are never implicitly
+A new response, including a partial response, replaces the unresolved interval's
+saved sample even when it contains fewer valid records; an empty response removes
+its old rows. Parse losses still leave the interval incomplete. Failed requests
+preserve saved evidence. Completed intervals stay frozen and are never implicitly
 queried again. They are observations gathered at different times, not a server
 snapshot: refreshing them or including late arrivals requires a fresh
 investigation. Resume uses the same atomic publication and exclusive writer lock
