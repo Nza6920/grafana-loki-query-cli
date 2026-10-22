@@ -194,6 +194,47 @@ still issues one logical range request with existing retries; it never
 silently scans additional intervals. `--report` is log-only; metric behavior
 and output remain unchanged.
 
+## Bounded interval scans
+
+Add `--scan` explicitly to scan a log-query range. The complete LogQL, profile,
+and time scope are retained. Relative times are frozen once; RFC 3339 bounds
+preserve nanosecond precision, including sub-second ranges. The scan uses
+contiguous half-open intervals of at most 15 minutes, with a shorter final
+interval. Requests run serially, newest interval first by default or oldest
+first with `--direction forward`; displayed logs remain globally descending.
+
+```bash
+loki-query query --profile prod --since 1h --scan \
+  --max-http-attempts 60 --max-elapsed-seconds 300 --max-records 10000 \
+  --output jsonl --report scan-report.json '{namespace="prod",app="api"}'
+```
+
+Scan defaults are `--limit 1000` per request, 60 actual HTTP attempts including
+retries, 300 seconds including waits, and 10000 retained records. Override
+these using `--limit`, `--max-http-attempts`, `--max-elapsed-seconds`, and
+`--max-records`; budgets must be positive and finite. The three budget options
+require `--scan`, and all scan options reject metric queries before networking.
+Ordinary queries retain their default limit of 100 and existing behavior.
+
+The remaining elapsed allowance constrains every HTTP timeout. A retry wait
+that would consume the remaining allowance stops the scan without sleeping;
+a retry never sleeps after exhausting the attempt budget. There are at most
+two retries per interval for retryable HTTP responses, with `Retry-After`
+respected for 429. The remaining record allowance also caps the next request's
+limit; even an oversized response cannot exceed retained capacity. Identical
+records remain separate evidence, and actual raw network counts are reported
+separately from retained valid records. Each coverage interval records its
+actual attempt count and requested limit (null for unqueried work).
+
+A saturated response or timeout leaves an explicit gap in this fixed-interval
+scan. Parse losses and exhausted temporary failures preserve valid evidence
+and allow independent intervals to continue. Authentication and invalid-query
+failures stop immediately, retaining earlier evidence and reporting remaining
+work. Reports identify `http_attempt_budget`, `elapsed_time_budget`, and
+`record_budget` stops. Unresolved scans return 4, authentication returns 3,
+and configuration errors return 2. Scans do not write log archives; only an
+explicit `--report` writes completeness metadata.
+
 ## Trace timelines
 
 Use an explicitly selected profile, a single stream selector, and an explicit

@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 import os
+import math
 from pathlib import Path
 import sys
 import time
@@ -23,6 +24,7 @@ from .client import (
 from .config import ConfigurationError, default_config_path, load_config
 from .output import write_result
 from .reporting import log_report, validate_report_destination, write_log_report
+from .scanning import ScanOptions, scan_range
 from .time_range import TimeRangeError, resolve_time_range
 from .trace import configure_trace_parser, run_trace
 
@@ -118,7 +120,7 @@ def build_parser(
         "--limit",
         type=_limit,
         default=None,
-        help="Maximum log entries (1-5000; default: 100).",
+        help="Maximum entries per request (1-5000; default: 100, scan: 1000).",
     )
     query_parser.add_argument(
         "--direction",
@@ -143,6 +145,10 @@ def build_parser(
         default=30.0,
         help="HTTP timeout in seconds (default: 30).",
     )
+    query_parser.add_argument("--scan", action="store_true", help="Scan consecutive intervals with bounded execution.")
+    query_parser.add_argument("--max-http-attempts", type=_positive_int, help="Scan HTTP attempt budget (default: 60).")
+    query_parser.add_argument("--max-elapsed-seconds", type=_positive_float, help="Scan elapsed budget (default: 300).")
+    query_parser.add_argument("--max-records", type=_positive_int, help="Scan retained record budget (default: 10000).")
     query_parser.add_argument("--report", help="Write log completeness JSON to this file.")
     query_parser.add_argument("logql", help="Complete LogQL query, or - to read stdin.")
     configure_trace_parser(
@@ -177,13 +183,23 @@ def _limit(value: str) -> int:
     return parsed
 
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("budget must be an integer") from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("budget must be positive")
+    return parsed
+
+
 def _positive_float(value: str) -> float:
     try:
         parsed = float(value)
     except ValueError as error:
         raise argparse.ArgumentTypeError("timeout must be a number") from error
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("timeout must be positive")
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be finite and positive")
     return parsed
 
 
@@ -279,6 +295,17 @@ def _dispatch(
             raise ConfigurationError(
                 "--end requires --start and cannot be combined with --since."
             )
+        scan_flags = [flag for flag, value in (
+            ("--max-http-attempts", args.max_http_attempts),
+            ("--max-elapsed-seconds", args.max_elapsed_seconds),
+            ("--max-records", args.max_records),
+        ) if value is not None]
+        if args.scan:
+            scan_flags.append("--scan")
+        if scan_flags and args.query_type == "metric":
+            raise ConfigurationError(f"{', '.join(scan_flags)} cannot be used with metric queries.")
+        if scan_flags and not args.scan:
+            raise ConfigurationError(f"{', '.join(scan_flags)} requires --scan.")
         if args.query_type == "metric":
             invalid_flags = [
                 flag
@@ -316,6 +343,19 @@ def _dispatch(
             end=args.end,
             now=now,
         )
+        if args.scan:
+            outcome = scan_range(
+                profile=profile, token=token, query=query.strip(), start_ns=start_ns, end_ns=end_ns,
+                direction=args.direction or "backward",
+                options=ScanOptions(limit=args.limit or 1000,
+                    max_http_attempts=args.max_http_attempts or 60,
+                    max_elapsed_seconds=args.max_elapsed_seconds or 300.0,
+                    max_records=args.max_records or 10000, timeout=args.timeout),
+                opener=opener, sleeper=sleeper, monotonic=monotonic,
+            )
+            write_result(outcome.result, args.output, output_stream)
+            write_log_report(outcome.report, args.report, error_stream, token=token)
+            return outcome.exit_code
         started = monotonic()
         attempts = 0
 
