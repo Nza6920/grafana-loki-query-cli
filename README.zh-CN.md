@@ -193,10 +193,26 @@ loki-query trace --profile uat --selector '{namespace="apps",app=~"api|worker"}'
 默认 JSON body 模式只检查顶层 `trace_id` 或 `traceId`，要求完整、区分大小写的
 **字符串**相等。CLI 使用原样 selector 获取候选记录，再在本地解析原始 JSON 并
 精确匹配，保留 selector 约束、原始日志及所有返回标签，包括与字段同名的标签。
-Trace ID 不会插入 LogQL。数字、字段缺失、非 JSON、重复 JSON 键和非标准 JSON
+JSON body 模式的 Trace ID 不会插入 LogQL。数字、字段缺失、非 JSON、重复 JSON 键和非标准 JSON
 常量都不确认匹配；这些正常的不匹配不计入 API 解析损失。不会回退到标签或全文
 匹配；独立的 `query` 仍支持调用者编写全文查询。`--selector` 后的 pipeline 或
 表达式会在联网前被拒绝。
+
+ID 位于返回标签时，必须显式选择标签来源，并提供一个或多个 `--field`：
+
+```bash
+loki-query trace --profile uat --selector '{namespace="apps",app=~"api|worker"}' \
+  --since 15m --source label --field trace_id --field correlation_id 'your-trace-id'
+```
+
+默认是 `--source json`；每次查询只使用选定的来源。标签模式对完整标签字符串进行
+区分大小写的精确匹配，包括普通返回标签映射中暴露的 structured metadata。
+CLI 在原始 selector 后追加精确 OR 标签过滤器，安全引用 ID，再在本地核对返回标签。
+字段名必须是 ASCII 标识符（`[A-Za-z_][A-Za-z0-9_]*`）；JSON `--path` 选项会在
+联网前被拒绝。正文不必包含 ID，也不必是 JSON；不会回退到正文或合并两个来源。
+原始日志及标签完整保留，报告记录来源、字段、规范化映射、原始 selector 和生成查询。
+字段顺序及重复字段不改变标签调查身份。正文缺失或冲突的值不能确认标签匹配，
+不会启用 categorized-label 响应格式。
 
 人类可读时间线按纳秒时间戳升序排列，默认用 `app` 展示服务，同时保留 namespace
 及所有返回标签。`--service-field NAME` 可指定其他返回标签，缺失时显示 `unknown`。

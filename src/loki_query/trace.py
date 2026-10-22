@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping
 from datetime import datetime
 import json
 from pathlib import Path
+import re
 from typing import Any, TextIO
 from urllib.request import Request
 
@@ -21,6 +22,10 @@ def configure_trace_parser(
     parser.add_argument('trace_id', help='Complete case-sensitive trace ID.')
     parser.add_argument('--profile', required=True, help='Named target profile.')
     parser.add_argument('--selector', required=True, help='One Loki stream selector; no pipeline.')
+    parser.add_argument('--source', choices=('json', 'label'), default='json',
+                        help='Trace field source (default: json); label requires --field.')
+    parser.add_argument('--field', dest='fields', action='append', help='Literal trace field name; repeat for alternatives.')
+    parser.add_argument('--path', dest='paths', action='append', help='JSON object path; incompatible with label source.')
     ranges = parser.add_mutually_exclusive_group(required=True)
     ranges.add_argument('--since', help='Relative duration such as 15m.')
     ranges.add_argument('--start', help='RFC 3339 range start.')
@@ -87,6 +92,24 @@ def matched_trace(result: QueryResult, trace_id: str) -> QueryResult:
     return QueryResult('log', list(matches), result.skipped, result.raw_entries, result.raw_count_exact)
 
 
+def label_query(selector: str, trace_id: str, fields: list[str] | None, paths: list[str] | None) -> str:
+    if paths:
+        raise ConfigurationError('--path cannot be combined with --source label.')
+    if not fields or any(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', field) is None for field in fields):
+        raise ConfigurationError('--source label requires explicit --field names using ASCII label identifiers.')
+    # JSON quoted strings are valid Go/LogQL interpreted strings for these values.
+    quoted = json.dumps(trace_id, ensure_ascii=False)
+    filters = ' or '.join(f'{field}={quoted}' for field in fields)
+    return f'{selector} | ({filters})'
+
+
+def matched_labels(result: QueryResult, trace_id: str, fields: list[str]) -> QueryResult:
+    matches = [record for record in result.records if isinstance(record, LogEntry)
+               and any(record.labels.get(field) == trace_id for field in fields)]
+    matches.sort(key=lambda entry: (entry.timestamp_ns, sorted(entry.labels.items()), entry.line))
+    return QueryResult('log', list(matches), result.skipped, result.raw_entries, result.raw_count_exact)
+
+
 def write_trace_result(result: QueryResult, output_format: str, stream: TextIO, *, service_field: str) -> None:
     if not result.records:
         return
@@ -111,6 +134,9 @@ def run_trace(
     validate_selector(args.selector)
     if not args.trace_id or not args.service_field.strip():
         raise ConfigurationError("Trace ID and service field must not be empty.")
+    label_fields = sorted(set(args.fields or []))
+    query = (label_query(args.selector, args.trace_id, label_fields, args.paths)
+             if args.source == 'label' else args.selector)
     validate_report_destination(args.report)
     config = load_config(config_path)
     profile = config.profiles.get(args.profile)
@@ -128,25 +154,32 @@ def run_trace(
         return opener(request, timeout)
 
     def report_for(result: QueryResult | None, matches: QueryResult | None, reason: str | None = None) -> dict[str, Any]:
-        report = log_report(profile=profile, query=args.selector, start_ns=start_ns, end_ns=end_ns,
+        report = log_report(profile=profile, query=query, start_ns=start_ns, end_ns=end_ns,
                             direction=args.direction, limit=args.limit, result=result, attempts=attempts,
                             elapsed_seconds=max(0.0, monotonic() - started), timeout=args.timeout,
                             failure_reason=reason)
-        report['trace'] = {'id': args.trace_id, 'source': 'json', 'fields': ['trace_id', 'traceId'],
-                           'matching': 'local exact JSON string matching on selector candidates'}
+        fields = label_fields if args.source == 'label' else ['trace_id', 'traceId']
+        report['trace'] = {'id': args.trace_id, 'source': args.source, 'fields': fields, 'selector': args.selector,
+                           'matching': ('server label filter and local exact returned-label matching'
+                                        if args.source == 'label' else
+                                        'local exact JSON string matching on selector candidates')}
+        if args.source == 'label':
+            report['trace']['paths'] = []
+            report['trace']['mapping'] = [[field] for field in fields]
         report['counts']['matched_records'] = len(matches.records) if matches else 0
         report['counts']['filtered_candidates'] = len(result.records) - len(matches.records) if result and matches else 0
         return report
 
     try:
-        result = query_range(profile=profile, token=token, query=args.selector, start_ns=start_ns,
+        result = query_range(profile=profile, token=token, query=query, start_ns=start_ns,
                              end_ns=end_ns, limit=args.limit, direction=args.direction, timeout=args.timeout,
                              opener=counted_opener, sleeper=sleeper)
     except QueryError as error:
         report = report_for(None, None, 'authentication_failed' if isinstance(error, AuthenticationError) else 'request_failed')
         write_log_report(report, args.report, stderr, token=token)
         raise
-    matches = matched_trace(result, args.trace_id)
+    matches = (matched_labels(result, args.trace_id, label_fields) if args.source == 'label'
+               else matched_trace(result, args.trace_id))
     write_trace_result(matches, args.output, stdout, service_field=args.service_field)
     print("Trace timeline: equal timestamps do not imply causality.", file=stderr)
     report = report_for(result, matches)
