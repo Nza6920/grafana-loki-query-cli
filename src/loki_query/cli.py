@@ -152,7 +152,7 @@ def build_parser(
     query_parser.add_argument("--report", help="Write log completeness JSON to this file.")
     query_parser.add_argument("logql", help="Complete LogQL query, or - to read stdin.")
     configure_trace_parser(
-        subparsers.add_parser("trace", help="Query exact JSON trace IDs and show a timeline."),
+        subparsers.add_parser("trace", help="Query exact trace IDs and show a timeline."),
         limit_type=_limit, timeout_type=_positive_float,
     )
     profiles_parser = subparsers.add_parser(
