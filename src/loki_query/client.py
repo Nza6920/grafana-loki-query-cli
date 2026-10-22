@@ -69,11 +69,20 @@ class QueryResult:
     query_type: QueryType
     records: list[Record]
     skipped: ParseSummary = ParseSummary()
+    raw_entries: int = 0
+    raw_count_exact: bool = True
 
 
 def default_opener(request: Request, timeout: float) -> ReadableResponse:
     response = urlopen(request, timeout=timeout)  # noqa: S310 - configured endpoint
     return cast(ReadableResponse, response)
+
+
+def query_endpoint(profile: Profile) -> str:
+    return (
+        f"{profile.grafana_url}/api/datasources/proxy/uid/"
+        f"{quote(profile.datasource_uid, safe='')}/loki/api/v1/query_range"
+    )
 
 
 def query_range(
@@ -91,10 +100,7 @@ def query_range(
     opener: Opener = default_opener,
     sleeper: Sleeper = time.sleep,
 ) -> QueryResult:
-    endpoint = (
-        f"{profile.grafana_url}/api/datasources/proxy/uid/"
-        f"{quote(profile.datasource_uid, safe='')}/loki/api/v1/query_range"
-    )
+    endpoint = query_endpoint(profile)
     request_params = {
         "query": query,
         "start": str(start_ns),
@@ -196,6 +202,7 @@ def _result_from_payload(
             query_type=query_type,
             records=[],
             skipped=ParseSummary(skipped_series=1),
+            raw_count_exact=False,
         )
 
     if query_type == "metric":
@@ -245,14 +252,23 @@ def _result_from_payload(
     entries: list[Record] = []
     skipped_series = 0
     skipped_entries = 0
+    raw_entries = 0
+    raw_count_exact = True
     for stream in result:
         if not isinstance(stream, dict):
             skipped_series += 1
+            raw_count_exact = False
             continue
         labels = _labels(stream.get("stream"))
         values = stream.get("values")
-        if labels is None or not isinstance(values, list):
+        if not isinstance(values, list):
             skipped_series += 1
+            raw_count_exact = False
+            continue
+        raw_entries += len(values)
+        if labels is None:
+            skipped_series += 1
+            skipped_entries += len(values)
             continue
         for entry in values:
             if not isinstance(entry, list) or len(entry) != 2:
@@ -277,6 +293,8 @@ def _result_from_payload(
     return QueryResult(
         query_type="log",
         records=sorted(entries, key=lambda entry: entry.timestamp_ns, reverse=True),
+        raw_entries=raw_entries,
+        raw_count_exact=raw_count_exact,
         skipped=ParseSummary(
             skipped_series=skipped_series,
             skipped_entries=skipped_entries,

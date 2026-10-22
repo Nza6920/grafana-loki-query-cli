@@ -21,7 +21,7 @@ usage: loki-query query [-h] --profile PROFILE [--query-type {log,metric}]
                         [--since SINCE | --start START] [--end END]
                         [--limit LIMIT] [--direction {backward,forward}]
                         [--step STEP] [--output {human,raw,jsonl}]
-                        [--timeout TIMEOUT]
+                        [--timeout TIMEOUT] [--report REPORT]
                         logql
 
 positional arguments:
@@ -42,6 +42,7 @@ options:
   --output {human,raw,jsonl}
                         Output format (default: human).
   --timeout TIMEOUT     HTTP timeout in seconds (default: 30).
+  --report REPORT       Write log completeness JSON to this file.
 
 $ loki-query config --help
 usage: loki-query config [-h] {path,validate} ...
