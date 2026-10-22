@@ -198,6 +198,24 @@ Trace ID 不会插入 LogQL。数字、字段缺失、非 JSON、重复 JSON 键
 匹配；独立的 `query` 仍支持调用者编写全文查询。`--selector` 后的 pipeline 或
 表达式会在联网前被拒绝。
 
+重复传入 `--field NAME` 可选择顶层 JSON 的字面键名，重复传入 `--path POINTER`
+可选择嵌套 JSON 对象成员。合并后的自定义列表**替换**两个默认字段，任一所选
+字段或路径匹配即可。例如：
+
+```bash
+loki-query trace --profile uat --selector '{namespace="apps",app="api"}' \
+  --since 15m --field 'trace.id' --path '/context/traceId' 'your-trace-id'
+```
+
+其中 `trace.id` 是单个字面键，`/context/traceId` 则依次访问两层对象成员。
+路径使用 JSON Pointer 转义：`~1` 代表 `/`，`~0` 代表 `~`；
+`/a~1b/~0key` 选择 `a/b` 下的 `~key`。成员名必须非空且不含控制字符。
+空名称、无效转义及不以 `/` 开头的路径在联网前拒绝。路径只遍历对象，
+不解释数组下标、通配符、点分路径或 JSONPath。字面字段名可包含标点、引号及
+空格，但必须非空且不含控制字符。名称和 ID 均只作为本地数据，不生成 LogQL。
+字段缺失或值非字符串时不会回退到默认字段。报告包含所选 `fields`、`paths`，
+以及排序、去重的解码后对象成员 `mapping`，用于标识查询身份。
+
 人类可读时间线按纳秒时间戳升序排列，默认用 `app` 展示服务，同时保留 namespace
 及所有返回标签。`--service-field NAME` 可指定其他返回标签，缺失时显示 `unknown`。
 相同时间戳按标签及文本确定显示顺序，不推断因果；真实重复记录仍重复保留。

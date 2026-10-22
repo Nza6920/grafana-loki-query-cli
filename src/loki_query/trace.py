@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping
 from datetime import datetime
 import json
 from pathlib import Path
+import re
 from typing import Any, TextIO
 from urllib.request import Request
 
@@ -13,6 +14,8 @@ from .config import ConfigurationError, load_config
 from .output import format_timestamp_utc, write_result
 from .reporting import log_report, validate_report_destination, write_log_report
 from .time_range import resolve_time_range
+
+DEFAULT_TRACE_MAPPING = (('trace_id',), ('traceId',))
 
 def configure_trace_parser(
     parser: argparse.ArgumentParser, *, limit_type: Callable[[str], int],
@@ -29,6 +32,8 @@ def configure_trace_parser(
     parser.add_argument('--direction', choices=('backward', 'forward'), default='backward')
     parser.add_argument('--output', choices=('human', 'raw', 'jsonl'), default='human')
     parser.add_argument('--service-field', default='app', help='Returned service label (default: app).')
+    parser.add_argument('--field', dest='fields', action='append', help='Literal top-level JSON field; repeat to match any selected field.')
+    parser.add_argument('--path', dest='paths', action='append', help='JSON Pointer to nested object members; repeat to match any selected path.')
     parser.add_argument('--timeout', type=timeout_type, default=30.0)
     parser.add_argument('--report', help='Write trace completeness JSON to this file.')
 
@@ -69,7 +74,36 @@ def _json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _invalid_constant(value: str) -> Any:
     raise ValueError('Non-JSON numeric constant.')
 
-def matched_trace(result: QueryResult, trace_id: str) -> QueryResult:
+def resolve_json_mapping(
+    fields: list[str] | None, paths: list[str] | None,
+) -> tuple[tuple[str, ...], ...]:
+    if fields is None and paths is None:
+        return DEFAULT_TRACE_MAPPING
+    for field in fields or []:
+        if not field or any(ord(character) < 32 or ord(character) == 127 for character in field):
+            raise ConfigurationError('--field requires a nonempty literal key without control characters.')
+    mapping: set[tuple[str, ...]] = {(field,) for field in fields or []}
+    for path in paths or []:
+        if (not path.startswith('/') or re.search(r'~(?![01])', path)
+                or any(ord(character) < 32 or ord(character) == 127 for character in path)
+                or any(not component for component in path[1:].split('/'))):
+            raise ConfigurationError('--path requires a JSON Pointer with nonempty object members; '
+                                     'escape ~ as ~0 and / as ~1.')
+        mapping.add(tuple(component.replace('~1', '/').replace('~0', '~')
+                          for component in path[1:].split('/')))
+    return tuple(sorted(mapping))
+
+def _mapped_value(body: dict[str, Any], path: tuple[str, ...]) -> Any:
+    value: Any = body
+    for component in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(component)
+    return value
+
+def matched_trace(
+    result: QueryResult, trace_id: str, mapping: tuple[tuple[str, ...], ...] = DEFAULT_TRACE_MAPPING,
+) -> QueryResult:
     matches: list[LogEntry] = []
     for record in result.records:
         if not isinstance(record, LogEntry):
@@ -79,8 +113,8 @@ def matched_trace(result: QueryResult, trace_id: str) -> QueryResult:
         except (ValueError, RecursionError):
             continue
         if isinstance(body, dict) and any(
-            isinstance(body.get(field), str) and body[field] == trace_id
-            for field in ('trace_id', 'traceId')
+            isinstance(value := _mapped_value(body, path), str) and value == trace_id
+            for path in mapping
         ):
             matches.append(record)
     matches.sort(key=lambda entry: (entry.timestamp_ns, sorted(entry.labels.items()), entry.line))
@@ -109,6 +143,9 @@ def run_trace(
     if args.end and not args.start:
         raise ConfigurationError('--end requires --start and cannot be combined with --since.')
     validate_selector(args.selector)
+    mapping = resolve_json_mapping(args.fields, args.paths)
+    fields = sorted(set(args.fields or [])) if args.fields is not None or args.paths is not None else ['trace_id', 'traceId']
+    paths = sorted(set(args.paths or []))
     if not args.trace_id or not args.service_field.strip():
         raise ConfigurationError("Trace ID and service field must not be empty.")
     validate_report_destination(args.report)
@@ -132,7 +169,9 @@ def run_trace(
                             direction=args.direction, limit=args.limit, result=result, attempts=attempts,
                             elapsed_seconds=max(0.0, monotonic() - started), timeout=args.timeout,
                             failure_reason=reason)
-        report['trace'] = {'id': args.trace_id, 'source': 'json', 'fields': ['trace_id', 'traceId'],
+        report['trace'] = {'id': args.trace_id, 'source': 'json', 'fields': fields,
+                           'paths': paths,
+                           'mapping': [list(path) for path in sorted(mapping)],
                            'matching': 'local exact JSON string matching on selector candidates'}
         report['counts']['matched_records'] = len(matches.records) if matches else 0
         report['counts']['filtered_candidates'] = len(result.records) - len(matches.records) if result and matches else 0
@@ -146,7 +185,7 @@ def run_trace(
         report = report_for(None, None, 'authentication_failed' if isinstance(error, AuthenticationError) else 'request_failed')
         write_log_report(report, args.report, stderr, token=token)
         raise
-    matches = matched_trace(result, args.trace_id)
+    matches = matched_trace(result, args.trace_id, mapping)
     write_trace_result(matches, args.output, stdout, service_field=args.service_field)
     print("Trace timeline: equal timestamps do not imply causality.", file=stderr)
     report = report_for(result, matches)
