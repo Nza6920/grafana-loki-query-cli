@@ -14,6 +14,7 @@ from urllib.request import Request
 
 from .client import (
     AuthenticationError,
+    HttpAttemptBudgetError,
     Opener,
     QueryError,
     ReadableResponse,
@@ -148,7 +149,7 @@ def build_parser(
         help="HTTP timeout in seconds (default: 30).",
     )
     query_parser.add_argument("--scan", action="store_true", help="Adaptively scan dense or timed-out intervals with bounded execution.")
-    query_parser.add_argument("--max-http-attempts", type=_positive_int, help="Scan HTTP attempt budget (default: 60).")
+    query_parser.add_argument("--max-http-attempts", type=_positive_int, help="HTTP attempt ceiling including retries (scan default: 60); explicit cap emits stderr accounting.")
     query_parser.add_argument("--max-elapsed-seconds", type=_positive_float, help="Scan elapsed budget (default: 300).")
     query_parser.add_argument("--max-records", type=_positive_int, help="Scan retained record budget (default: 10000).")
     query_parser.add_argument("--work-dir", help="Persist scan progress and evidence in this explicit directory.")
@@ -156,7 +157,7 @@ def build_parser(
     query_parser.add_argument("logql", help="Complete LogQL query, or - to read stdin.")
     configure_trace_parser(
         subparsers.add_parser("trace", help="Query exact trace IDs and show a timeline."),
-        limit_type=_limit, timeout_type=_positive_float,
+        limit_type=_limit, timeout_type=_positive_float, budget_type=_positive_int,
     )
     export_parser = subparsers.add_parser("export", help="Export a saved scan without configuration, credentials, or HTTP.")
     export_parser.add_argument("--work-dir", required=True, help="Saved scan directory.")
@@ -166,7 +167,7 @@ def build_parser(
     resume_parser.add_argument("--work-dir", required=True, help="Saved scan directory.")
     resume_parser.add_argument("--profile", required=True, help="Explicit original target profile.")
     resume_parser.add_argument("--limit", type=_limit, default=1000, help="Entries per request (default: 1000).")
-    resume_parser.add_argument("--max-http-attempts", type=_positive_int, default=60)
+    resume_parser.add_argument("--max-http-attempts", type=_positive_int, help="HTTP attempt ceiling including retries (default: 60); explicit cap emits stderr accounting.")
     resume_parser.add_argument("--max-elapsed-seconds", type=_positive_float, default=300.0)
     resume_parser.add_argument("--max-records", type=_positive_int, default=10000)
     resume_parser.add_argument("--timeout", type=_positive_float, default=30.0)
@@ -252,6 +253,21 @@ def main(
         args = parser.parse_args(argv)
     except _ParserExit as outcome:
         return outcome.status
+    attempts = 0
+    cap = getattr(args, "max_http_attempts", None)
+
+    def bounded_opener(request: Request, timeout: float) -> ReadableResponse:
+        nonlocal attempts
+        if cap is not None and attempts >= cap:
+            raise HttpAttemptBudgetError("HTTP attempt budget exhausted.")
+        attempts += 1
+        return opener(request, timeout)
+
+    def bounded_sleeper(seconds: float) -> None:
+        if cap is not None and attempts >= cap:
+            raise HttpAttemptBudgetError("HTTP attempt budget exhausted before retry wait.")
+        sleeper(seconds)
+
     try:
         return _dispatch(
             args,
@@ -259,8 +275,8 @@ def main(
             input_stream=input_stream,
             output_stream=output_stream,
             error_stream=error_stream,
-            opener=opener,
-            sleeper=sleeper,
+            opener=bounded_opener,
+            sleeper=bounded_sleeper,
             now=now or datetime.now(UTC),
             monotonic=monotonic,
         )
@@ -273,6 +289,9 @@ def main(
     except QueryError as error:
         print(f"error: {error}", file=error_stream)
         return EXIT_QUERY
+    finally:
+        if cap is not None:
+            print(f"HTTP attempt accounting: used={attempts} cap={cap}", file=error_stream)
 
 
 def _dispatch(
@@ -321,7 +340,7 @@ def _dispatch(
                 profile=profile, token=resume_token, query=identity['query'],
                 start_ns=int(identity['start_ns']), end_ns=int(identity['end_ns']),
                 direction=identity['direction'],
-                options=ScanOptions(limit=args.limit, max_http_attempts=args.max_http_attempts,
+                options=ScanOptions(limit=args.limit, max_http_attempts=args.max_http_attempts or 60,
                     max_elapsed_seconds=args.max_elapsed_seconds, max_records=args.max_records,
                     timeout=args.timeout),
                 opener=opener, sleeper=sleeper, monotonic=monotonic, seed=saved,
@@ -351,7 +370,6 @@ def _dispatch(
                 "--end requires --start and cannot be combined with --since."
             )
         scan_flags = [flag for flag, value in (
-            ("--max-http-attempts", args.max_http_attempts),
             ("--max-elapsed-seconds", args.max_elapsed_seconds),
             ("--max-records", args.max_records),
             ("--work-dir", args.work_dir),
@@ -455,7 +473,9 @@ def _dispatch(
                     result=None, attempts=attempts, timeout=args.timeout,
                     elapsed_seconds=max(0.0, monotonic() - started),
                     failure_reason=("authentication_failed" if isinstance(error, AuthenticationError)
+                                    else "http_attempt_budget" if isinstance(error, HttpAttemptBudgetError)
                                     else "request_failed"),
+                    max_http_attempts=min(3, args.max_http_attempts or 3),
                 )
                 write_log_report(report, args.report, error_stream, token=token)
             raise
@@ -465,6 +485,7 @@ def _dispatch(
                 profile=profile, query=query.strip(), start_ns=start_ns, end_ns=end_ns,
                 direction=args.direction or "backward", limit=args.limit or 100,
                 result=result, attempts=attempts, timeout=args.timeout, elapsed_seconds=max(0.0, monotonic() - started),
+                max_http_attempts=min(3, args.max_http_attempts or 3),
             )
             write_log_report(report, args.report, error_stream, token=token)
         if result.skipped.incomplete:

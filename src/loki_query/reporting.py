@@ -12,6 +12,7 @@ def log_report(
     *, profile: Profile, query: str, start_ns: int, end_ns: int,
     direction: str, limit: int, result: QueryResult | None, attempts: int,
     elapsed_seconds: float, timeout: float, failure_reason: str | None = None,
+    max_http_attempts: int = 3,
 ) -> dict[str, Any]:
     interval = {"start_ns": str(start_ns), "end_ns": str(end_ns)}
     usage = {"http_attempts": attempts, "elapsed_seconds": elapsed_seconds}
@@ -38,7 +39,7 @@ def log_report(
                    "skipped_series": result.skipped.skipped_series, "raw_count_exact": result.raw_count_exact},
         "request_limit": limit,
         "usage": {"current": usage, "cumulative": dict(usage)},
-        "budgets": {"max_http_attempts": 3, "max_elapsed_seconds": None, "max_records": None,
+        "budgets": {"max_http_attempts": max_http_attempts, "max_elapsed_seconds": None, "max_records": None,
                     "request_timeout_seconds": timeout},
         "stop_reasons": [failure_reason] if failure_reason else [],
     }

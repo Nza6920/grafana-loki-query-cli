@@ -54,7 +54,8 @@ options:
   --scan                Adaptively scan dense or timed-out intervals with
                         bounded execution.
   --max-http-attempts MAX_HTTP_ATTEMPTS
-                        Scan HTTP attempt budget (default: 60).
+                        HTTP attempt ceiling including retries (scan default:
+                        60); explicit cap emits stderr accounting.
   --max-elapsed-seconds MAX_ELAPSED_SECONDS
                         Scan elapsed budget (default: 300).
   --max-records MAX_RECORDS
@@ -87,6 +88,8 @@ options:
   --profile PROFILE     Explicit original target profile.
   --limit LIMIT         Entries per request (default: 1000).
   --max-http-attempts MAX_HTTP_ATTEMPTS
+                        HTTP attempt ceiling including retries (default: 60);
+                        explicit cap emits stderr accounting.
   --max-elapsed-seconds MAX_ELAPSED_SECONDS
   --max-records MAX_RECORDS
   --timeout TIMEOUT
@@ -100,7 +103,9 @@ usage: loki-query trace [-h] --profile PROFILE --selector SELECTOR
                         [--limit LIMIT] [--direction {backward,forward}]
                         [--output {human,raw,jsonl}]
                         [--service-field SERVICE_FIELD] [--field NAME]
-                        [--path POINTER] [--timeout TIMEOUT] [--report REPORT]
+                        [--path POINTER] [--timeout TIMEOUT]
+                        [--max-http-attempts MAX_HTTP_ATTEMPTS]
+                        [--report REPORT]
                         trace_id
 
 positional arguments:
@@ -126,6 +131,9 @@ options:
   --path POINTER        JSON Pointer to nested object members; JSON source
                         only.
   --timeout TIMEOUT
+  --max-http-attempts MAX_HTTP_ATTEMPTS
+                        HTTP attempt ceiling including retries; explicit cap
+                        emits stderr accounting.
   --report REPORT       Write trace completeness JSON to this file.
 
 $ loki-query config --help

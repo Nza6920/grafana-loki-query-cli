@@ -29,6 +29,10 @@ class QueryError(RuntimeError):
     """Raised when Grafana or Loki cannot return a usable response."""
 
 
+class HttpAttemptBudgetError(QueryError):
+    """Raised before a request or retry wait would exceed its HTTP cap."""
+
+
 class InvalidQueryError(QueryError):
     """Raised for invalid request parameters or LogQL."""
 
