@@ -179,8 +179,8 @@ malformed container or failed response prevents an exact count.
 
 `request_limit`, `usage.current`, `usage.cumulative`, `budgets`, and
 `stop_reasons` expose request limits, actual HTTP attempts (including retries),
-elapsed seconds (including waits), the existing three-attempt maximum and
-per-request timeout. Ordinary queries have no aggregate elapsed/record budget
+elapsed seconds (including waits), the effective attempt maximum (three, or a
+smaller explicit HTTP cap) and per-request timeout. Ordinary queries have no aggregate elapsed/record budget
 (the corresponding values are `null`), and current/cumulative usage is equal.
 A report is written on success and expected request failure, once the target
 and range are resolved. Configuration/input validation failures may occur
@@ -193,6 +193,36 @@ descending presentation even for `--direction forward`. An ordinary query
 still issues one logical range request with existing retries; it never
 silently scans additional intervals. `--report` is log-only; metric behavior
 and output remain unchanged.
+
+## HTTP attempt allowance
+
+An explicit `--max-http-attempts N` caps actual HTTP attempts, including failed
+requests and retries, on `query` (log or metric), `trace`, scans, and `resume`.
+It stops before the next request or retry wait when exhausted, returning query
+failure/incomplete status `4`; authentication retains status `3`. Applicable
+log completeness reports use `http_attempt_budget` for this stop. Ordinary and
+trace queries still make one logical request with at most three attempts;
+a larger cap adds no retries. Without an explicit cap their behavior remains
+unchanged. Scans and resumes keep their standalone default cap of 60.
+Metric queries continue to reject completeness `--report` and scan-only flags.
+
+When the cap is explicitly supplied, exactly one final scalar diagnostic is
+written to stderr, including on handled errors and interruption:
+
+```text
+HTTP attempt accounting: used=2 cap=57
+```
+
+This exact grammar is a stable accounting contract: `used` and `cap` are decimal
+integers; `used` counts attempts begun by this process, including failed or
+interrupted attempts. It is separate from completeness JSON and never enters
+stdout. Pre-network validation errors report zero once arguments are parsed;
+argument parsing failures or forced termination may leave no marker. Output or
+report failures still finalize accounting when stderr remains writable. Offline
+`export` performs no HTTP and emits no marker. A consumer must accept only one
+final marker from the current invocation with matching cap and `0 <= used <= cap`;
+otherwise conservatively charge the whole passed cap. For resumes use this
+current-process count, not cumulative saved usage.
 
 ## Bounded interval scans
 
@@ -212,8 +242,10 @@ loki-query query --profile prod --since 1h --scan \
 Scan defaults are `--limit 1000` per request, 60 actual HTTP attempts including
 retries, 300 seconds including waits, and 10000 retained records. Override
 these using `--limit`, `--max-http-attempts`, `--max-elapsed-seconds`, and
-`--max-records`; budgets must be positive and finite. The three budget options
-require `--scan`, and all scan options reject metric queries before networking.
+`--max-records`; budgets must be positive and finite. `--max-elapsed-seconds`
+and `--max-records` require `--scan`; scan-only options reject metric queries
+before networking. `--max-http-attempts` also applies to ordinary queries and
+trace, as described above.
 Ordinary queries retain their default limit of 100 and existing behavior.
 
 The remaining elapsed allowance constrains every HTTP timeout. A retry wait
@@ -422,9 +454,17 @@ selector. It defaults to the last 15 minutes, 100 entries, and JSONL output.
 Each CLI query is limited to a 24-hour window. A window beyond one hour must
 be explicitly approved in the current request, as must switching profiles.
 The five-query limit applies to all CLI queries in one user request, including
-the initial query. Results distinguish matching log evidence, inferences, and
-unresolved checks while omitting irrelevant production content and
-credentials.
+the initial query, scans, trace queries, and resumes, even on failure. A shared
+request allowance defaults to 60 actual HTTP attempts including retries. The
+skill passes only the remaining amount as `--max-http-attempts`, settles the
+final accounting marker after every outcome, and charges the full reserved cap
+if trustworthy accounting is missing. Restarting the CLI or changing work
+directories cannot reset the ledger. Only explicit user direction can increase
+the request-wide total (raising 60 to 90 after charging 60 leaves 30); this does
+not waive the five-query limit. Offline export remains available at exhaustion.
+Results distinguish returned evidence, inferences, unresolved checks, actual
+usage, and conservative charges while omitting irrelevant production content
+and credentials.
 
 To use it in another repository, install or link `.agents/skills/loki-query` into that repository's skills directory and make sure the `loki-query` command has been installed with `pipx`.
 

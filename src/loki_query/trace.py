@@ -9,7 +9,7 @@ import re
 from typing import Any, TextIO
 from urllib.request import Request
 
-from .client import AuthenticationError, LogEntry, Opener, QueryError, QueryResult, ReadableResponse, Sleeper, query_range
+from .client import AuthenticationError, HttpAttemptBudgetError, LogEntry, Opener, QueryError, QueryResult, ReadableResponse, Sleeper, query_range
 from .config import ConfigurationError, load_config
 from .output import format_timestamp_utc, write_result
 from .reporting import log_report, validate_report_destination, write_log_report
@@ -29,7 +29,7 @@ class _SourceAction(argparse.Action):
 
 def configure_trace_parser(
     parser: argparse.ArgumentParser, *, limit_type: Callable[[str], int],
-    timeout_type: Callable[[str], float],
+    timeout_type: Callable[[str], float], budget_type: Callable[[str], int],
 ) -> None:
     parser.add_argument('trace_id', help='Complete case-sensitive trace ID.')
     parser.add_argument('--profile', required=True, help='Named target profile.')
@@ -49,6 +49,8 @@ def configure_trace_parser(
     parser.add_argument('--path', dest='paths', metavar='POINTER', action='append',
                         help='JSON Pointer to nested object members; JSON source only.')
     parser.add_argument('--timeout', type=timeout_type, default=30.0)
+    parser.add_argument('--max-http-attempts', type=budget_type,
+                        help='HTTP attempt ceiling including retries; explicit cap emits stderr accounting.')
     parser.add_argument('--report', help='Write trace completeness JSON to this file.')
 
 
@@ -203,7 +205,7 @@ def run_trace(
         report = log_report(profile=profile, query=query, start_ns=start_ns, end_ns=end_ns,
                             direction=args.direction, limit=args.limit, result=result, attempts=attempts,
                             elapsed_seconds=max(0.0, monotonic() - started), timeout=args.timeout,
-                            failure_reason=reason)
+                            failure_reason=reason, max_http_attempts=min(3, args.max_http_attempts or 3))
         report['trace'] = {'id': args.trace_id, 'source': args.source, 'fields': fields, 'selector': args.selector,
                            'paths': paths, 'mapping': [list(path) for path in sorted(mapping)],
                            'matching': ('server label filter and local exact returned-label matching'
@@ -218,7 +220,7 @@ def run_trace(
                              end_ns=end_ns, limit=args.limit, direction=args.direction, timeout=args.timeout,
                              opener=counted_opener, sleeper=sleeper)
     except QueryError as error:
-        report = report_for(None, None, 'authentication_failed' if isinstance(error, AuthenticationError) else 'request_failed')
+        report = report_for(None, None, 'authentication_failed' if isinstance(error, AuthenticationError) else 'http_attempt_budget' if isinstance(error, HttpAttemptBudgetError) else 'request_failed')
         write_log_report(report, args.report, stderr, token=token)
         raise
     matches = (matched_labels(result, args.trace_id, label_fields) if args.source == 'label'
