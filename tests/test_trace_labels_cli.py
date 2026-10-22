@@ -69,6 +69,7 @@ class TraceLabelsCliTests(unittest.TestCase):
         for flags in invalid:
             with self.subTest(flags=flags):
                 self.assertEqual(self.invoke([], '--source', 'label', *flags), 2)
+        self.assertEqual(self.invoke([], '--source', 'json', '--source', 'label', '--field', 'trace_id'), 2)
         self.assertEqual(self.requests, [])
 
     def test_any_selected_label_matches_and_mapping_is_canonical(self) -> None:

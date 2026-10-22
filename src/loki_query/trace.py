@@ -15,6 +15,17 @@ from .output import format_timestamp_utc, write_result
 from .reporting import log_report, validate_report_destination, write_log_report
 from .time_range import resolve_time_range
 
+
+class _SourceAction(argparse.Action):
+    def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace,
+                 values: Any, option_string: str | None = None) -> None:
+        previous = getattr(namespace, '_explicit_trace_source', None)
+        if previous is not None and previous != values:
+            raise argparse.ArgumentError(self, 'Choose only one trace source mode.')
+        setattr(namespace, '_explicit_trace_source', values)
+        setattr(namespace, self.dest, values)
+
+
 def configure_trace_parser(
     parser: argparse.ArgumentParser, *, limit_type: Callable[[str], int],
     timeout_type: Callable[[str], float],
@@ -22,7 +33,7 @@ def configure_trace_parser(
     parser.add_argument('trace_id', help='Complete case-sensitive trace ID.')
     parser.add_argument('--profile', required=True, help='Named target profile.')
     parser.add_argument('--selector', required=True, help='One Loki stream selector; no pipeline.')
-    parser.add_argument('--source', choices=('json', 'label'), default='json',
+    parser.add_argument('--source', choices=('json', 'label'), default='json', action=_SourceAction,
                         help='Trace field source (default: json); label requires --field.')
     parser.add_argument('--field', dest='fields', action='append', help='Literal trace field name; repeat for alternatives.')
     parser.add_argument('--path', dest='paths', action='append', help='JSON object path; incompatible with label source.')
