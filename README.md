@@ -147,6 +147,53 @@ with status `4`. If every record is malformed, stdout stays empty.
 
 The CLI retries only `429`, `502`, `503`, and `504` responses, at most twice, and honors `Retry-After`. The default request timeout is 30 seconds. Tokens are read only from the environment variable named by the profile and never enter the command line or configuration file.
 
+## Log completeness reports
+
+Every ordinary log query writes one coverage/resource summary to stderr. A
+successful response below `--limit` with no parse loss resolves the requested
+range, including a valid empty response. Returning the limit warns of **possible
+truncation** while retaining exit status `0`; it does not prove records were
+omitted. Parse loss preserves usable stdout and returns `4`. Failed requests
+leave the range unresolved; authentication still returns `3`. These states
+concern retrieval under the selected query and absolute time range, not log
+ingestion completeness or proof that a business event did not occur.
+
+Use `--report FILE` to additionally write a versioned JSON report to an explicit
+regular file (its parent directory must exist; stdout/devices are rejected):
+
+```bash
+loki-query query --profile prod --since 30m --limit 1000 \
+  --output jsonl --report investigation-report.json \
+  '{namespace="newchiwan-prod"}' > evidence.jsonl
+```
+
+Report schema version `1` contains the profile, actual endpoint/datasource,
+query, absolute nanosecond bounds (decimal strings), requested fetch direction,
+`status` (`complete`, `incomplete`, or `failed`), and `coverage.resolved` /
+`coverage.unresolved` intervals. Unresolved intervals carry `reasons`, including
+`possible_truncation`, `parse_loss`, `request_failed`, or
+`authentication_failed`. `counts` separates raw returned entries, valid
+records, skipped entries, and skipped series. Raw entries include malformed
+records and entries in invalid-label series; `raw_count_exact: false` means a
+malformed container or failed response prevents an exact count.
+
+`request_limit`, `usage.current`, `usage.cumulative`, `budgets`, and
+`stop_reasons` expose request limits, actual HTTP attempts (including retries),
+elapsed seconds (including waits), the existing three-attempt maximum and
+per-request timeout. Ordinary queries have no aggregate elapsed/record budget
+(the corresponding values are `null`), and current/cumulative usage is equal.
+A report is written on success and expected request failure, once the target
+and range are resolved. Configuration/input validation failures may occur
+before a report can be produced. Reports contain no log records or token
+values; credentials remain in the environment.
+
+Without `--report` no JSON report is written. Stdout remains exclusively the
+selected evidence format, with unchanged JSONL records, raw lines, and global
+descending presentation even for `--direction forward`. An ordinary query
+still issues one logical range request with existing retries; it never
+silently scans additional intervals. `--report` is log-only; metric behavior
+and output remain unchanged.
+
 ## Skill
 
 The repository provides an explicitly invoked `$loki-query` skill at

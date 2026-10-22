@@ -143,6 +143,44 @@ CLI 会防御性解析 Loki 成功响应。响应中若有损坏的 series、日
 
 CLI 只对 `429`、`502`、`503`、`504` 最多重试两次，并遵循 `Retry-After`。默认请求超时为 30 秒。Token 只从 profile 指定的环境变量读取，不进入命令行或配置文件。
 
+## 日志完整性报告
+
+每次普通日志查询都会向 stderr 写入一条覆盖范围及资源摘要。成功响应的原始条目数
+低于 `--limit` 且没有解析损失时，请求范围视为已解决，合法的空响应也包括在内。
+达到 limit 会提示**可能截断**，但仍返回 `0`，这并不证明实际遗漏了记录。
+解析损失会保留可用 stdout 并返回 `4`；请求失败会留下未解决范围，鉴权失败仍返回
+`3`。这些状态只描述给定查询和绝对时间范围内的检索情况，不证明日志采集完整性，
+也不证明某个业务事件没有发生。
+
+通过 `--report FILE` 将带版本号的 JSON 报告写入显式指定的普通文件（父目录必须
+已经存在，不接受 stdout 或设备文件）：
+
+```bash
+loki-query query --profile prod --since 30m --limit 1000 \
+  --output jsonl --report investigation-report.json \
+  '{namespace="newchiwan-prod"}' > evidence.jsonl
+```
+
+报告 schema 版本为 `1`，包含 profile、实际 endpoint/datasource、查询、绝对纳秒
+边界（十进制字符串）、请求的获取方向、`status`（`complete`、`incomplete` 或
+`failed`），以及 `coverage.resolved` / `coverage.unresolved` 区间。未解决区间的
+`reasons` 包括 `possible_truncation`、`parse_loss`、`request_failed` 或
+`authentication_failed`。`counts` 分开统计原始条目、有效记录、跳过的条目及
+series；原始条目包括损坏的记录及标签无效的 series 中的条目。
+`raw_count_exact: false` 表示容器结构损坏或响应失败，无法精确统计原始条目数。
+
+`request_limit`、`usage.current`、`usage.cumulative`、`budgets` 和 `stop_reasons`
+记录请求 limit、包含重试的实际 HTTP 尝试次数、包含等待的耗时秒数、现有最多三次
+尝试限制及单次请求超时。普通查询没有累计耗时或记录数预算（对应字段为 `null`），
+本轮与累计用量相同。目标和范围解析完成后，成功和预期请求失败都会写入报告；配置或
+输入校验失败可能发生在能够生成报告之前。报告不包含日志记录或 token 值，凭证仍只
+保留在环境变量中。
+
+未指定 `--report` 时不写 JSON 报告。Stdout 只保留所选证据格式，JSONL 记录、raw
+原文及全局降序展示不变，即使使用 `--direction forward` 也是如此。普通查询仍只有
+一个逻辑范围请求及原有重试，不会隐式扫描更多区间。`--report` 仅适用于日志查询；
+指标查询的行为和输出保持不变。
+
 ## Skill
 
 仓库内显式调用的 `$loki-query` skill 位于

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 import os
@@ -9,17 +9,20 @@ from pathlib import Path
 import sys
 import time
 from typing import Any, NoReturn, Protocol, TextIO
+from urllib.request import Request
 
 from .client import (
     AuthenticationError,
     Opener,
     QueryError,
+    ReadableResponse,
     Sleeper,
     default_opener,
     query_range,
 )
 from .config import ConfigurationError, default_config_path, load_config
 from .output import write_result
+from .reporting import log_report, validate_report_destination, write_log_report
 from .time_range import TimeRangeError, resolve_time_range
 
 
@@ -139,6 +142,7 @@ def build_parser(
         default=30.0,
         help="HTTP timeout in seconds (default: 30).",
     )
+    query_parser.add_argument("--report", help="Write log completeness JSON to this file.")
     query_parser.add_argument("logql", help="Complete LogQL query, or - to read stdin.")
     profiles_parser = subparsers.add_parser(
         "profiles", help="Inspect configured profiles."
@@ -194,6 +198,7 @@ def main(
     opener: Opener = default_opener,
     sleeper: Sleeper = time.sleep,
     now: datetime | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> int:
     """Write command output to the supplied streams and return its exit code.
 
@@ -219,6 +224,7 @@ def main(
             opener=opener,
             sleeper=sleeper,
             now=now or datetime.now(UTC),
+            monotonic=monotonic,
         )
     except (ConfigurationError, TimeRangeError) as error:
         print(f"error: {error}", file=error_stream)
@@ -241,6 +247,7 @@ def _dispatch(
     opener: Opener,
     sleeper: Sleeper,
     now: datetime,
+    monotonic: Callable[[], float],
 ) -> int:
     selected_config_path = (
         Path(args.config).expanduser()
@@ -269,6 +276,7 @@ def _dispatch(
                 for flag, value in (
                     ("--limit", args.limit),
                     ("--direction", args.direction),
+                    ("--report", args.report),
                 )
                 if value is not None
             ]
@@ -278,6 +286,7 @@ def _dispatch(
                 )
         elif args.step is not None:
             raise ConfigurationError("--step cannot be used with log queries.")
+        validate_report_destination(args.report)
         config = load_config(selected_config_path)
         profile = config.profiles.get(args.profile)
         if profile is None:
@@ -298,26 +307,56 @@ def _dispatch(
             end=args.end,
             now=now,
         )
-        result = query_range(
-            profile=profile,
-            token=token,
-            query=query.strip(),
-            start_ns=start_ns,
-            end_ns=end_ns,
-            query_type=args.query_type,
-            limit=100 if args.query_type == "log" and args.limit is None else args.limit,
-            direction=(
-                "backward"
-                if args.query_type == "log" and args.direction is None
-                else args.direction
-            ),
-            step=args.step,
-            timeout=args.timeout,
-            opener=opener,
-            sleeper=sleeper,
-        )
+        started = monotonic()
+        attempts = 0
+
+        def counted_opener(request: Request, timeout: float) -> ReadableResponse:
+            nonlocal attempts
+            attempts += 1
+            return opener(request, timeout)
+
+        try:
+            result = query_range(
+                profile=profile,
+                token=token,
+                query=query.strip(),
+                start_ns=start_ns,
+                end_ns=end_ns,
+                query_type=args.query_type,
+                limit=100 if args.query_type == "log" and args.limit is None else args.limit,
+                direction=(
+                    "backward"
+                    if args.query_type == "log" and args.direction is None
+                    else args.direction
+                ),
+                step=args.step,
+                timeout=args.timeout,
+                opener=counted_opener,
+                sleeper=sleeper,
+            )
+        except QueryError as error:
+            if args.query_type == "log":
+                report = log_report(
+                    profile=profile, query=query.strip(), start_ns=start_ns, end_ns=end_ns,
+                    direction=args.direction or "backward", limit=args.limit or 100,
+                    result=None, attempts=attempts, timeout=args.timeout,
+                    elapsed_seconds=max(0.0, monotonic() - started),
+                    failure_reason=("authentication_failed" if isinstance(error, AuthenticationError)
+                                    else "request_failed"),
+                )
+                write_log_report(report, args.report, error_stream, token=token)
+            raise
         write_result(result, args.output, output_stream)
+        if args.query_type == "log":
+            report = log_report(
+                profile=profile, query=query.strip(), start_ns=start_ns, end_ns=end_ns,
+                direction=args.direction or "backward", limit=args.limit or 100,
+                result=result, attempts=attempts, timeout=args.timeout, elapsed_seconds=max(0.0, monotonic() - started),
+            )
+            write_log_report(report, args.report, error_stream, token=token)
         if result.skipped.incomplete:
+            if args.query_type == "log":
+                return EXIT_QUERY
             skipped = result.skipped
             print(
                 "warning: incomplete results; "
