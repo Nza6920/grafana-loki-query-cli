@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.request import Request
@@ -31,6 +32,8 @@ class ScanInterval:
     request_limit: int | None = None
     reasons: list[str] = field(default_factory=lambda: ["unqueried"])
     sample_origin: tuple[int, int] | None = None
+    # Execution-local ownership; persisted samples become baseline on resume.
+    sample_from_current_run: bool = False
 
 
 class BudgetStopped(Exception):
@@ -49,24 +52,40 @@ def scan_range(
     *, profile: Profile, token: str, query: str, start_ns: int, end_ns: int,
     direction: str, options: ScanOptions, opener: Opener, sleeper: Sleeper,
     monotonic: Callable[[], float], progress: Callable[[ScanOutcome], None] | None = None,
+    seed: ScanOutcome | None = None,
 ) -> ScanOutcome:
     started = monotonic()
     attempts = 0
     stop_reasons: list[str] = []
     fatal_code = 0
     width = 900_000_000_000
-    intervals = [ScanInterval(start, min(start + width, end_ns))
-                 for start in range(start_ns, end_ns, width)]
-    if direction == 'backward':
-        intervals.reverse()
-    requested: list[ScanInterval] = []
+    if seed is None:
+        intervals = [ScanInterval(start, min(start + width, end_ns))
+                     for start in range(start_ns, end_ns, width)]
+        if direction == 'backward':
+            intervals.reverse()
+    else:
+        intervals = deepcopy(seed.intervals)
+        for item in intervals:
+            item.sample_from_current_run = False
+    requested: list[tuple[ScanInterval, int]] = []
+    previous_requests = deepcopy(seed.report.get('requests', [])) if seed is not None else []
+    # Every checkpoint adds this execution to one immutable starting total.
+    baseline_usage = deepcopy(seed.report['usage']['cumulative']) if seed is not None else {}
+    baseline_counts = deepcopy(seed.report['counts']) if seed is not None else {}
     raw_entries = skipped_entries = skipped_series = 0
-    raw_count_exact = True
+    raw_count_exact = bool(baseline_counts.get('raw_count_exact', True))
+
+    def charged_records() -> int:
+        return sum(len(item.result.records) for item in intervals
+                   if item.sample_from_current_run and item.result is not None)
 
     def snapshot() -> ScanOutcome:
         records: list[Record] = [record for i in intervals if i.result is not None for record in i.result.records]
         combined = QueryResult('log', sorted(records, key=lambda record: record.timestamp_ns, reverse=True),
-                               ParseSummary(skipped_series, skipped_entries), raw_entries, raw_count_exact)
+                               ParseSummary(baseline_counts.get('skipped_series', 0) + skipped_series,
+                                            baseline_counts.get('skipped_entries', 0) + skipped_entries),
+                               baseline_counts.get('raw_entries', 0) + raw_entries, raw_count_exact)
         report = log_report(profile=profile, query=query, start_ns=start_ns, end_ns=end_ns,
                             direction=direction, limit=options.limit, result=combined,
                             attempts=attempts, elapsed_seconds=max(0.0, monotonic() - started), timeout=options.timeout)
@@ -87,9 +106,21 @@ def scan_range(
             'resolved': [coverage_interval(i) for i in intervals if not i.reasons],
             'unresolved': [coverage_interval(i) for i in intervals if i.reasons],
         }
-        report['requests'] = [{'start_ns': str(i.start_ns), 'end_ns': str(i.end_ns),
-                               'http_attempts': i.http_attempts, 'request_limit': i.request_limit,
-                               'reasons': list(i.reasons)} for i in requested if i.http_attempts]
+        report['requests'] = previous_requests + [
+            {'start_ns': str(i.start_ns), 'end_ns': str(i.end_ns),
+             'http_attempts': i.http_attempts - before, 'request_limit': i.request_limit,
+             'reasons': list(i.reasons)} for i, before in requested if i.http_attempts > before]
+        current = report['usage']['current']
+        current.update({'raw_entries': raw_entries, 'skipped_entries': skipped_entries,
+                        'skipped_series': skipped_series, 'retained_records': charged_records()})
+        report['usage']['cumulative'] = {
+            'http_attempts': baseline_usage.get('http_attempts', 0) + attempts,
+            'elapsed_seconds': baseline_usage.get('elapsed_seconds', 0.0) + current['elapsed_seconds'],
+            'raw_entries': combined.raw_entries,
+            'skipped_entries': combined.skipped.skipped_entries,
+            'skipped_series': combined.skipped.skipped_series,
+            'retained_records': len(records),
+        }
         report['status'] = 'failed' if fatal_code else 'incomplete' if report['coverage']['unresolved'] else 'complete'
         report['stop_reasons'] = stop_reasons
         report['budgets'] = {'max_http_attempts': options.max_http_attempts,
@@ -135,16 +166,20 @@ def scan_range(
     position = 0
     while position < len(intervals):
         interval = intervals[position]
+        if not interval.reasons:
+            position += 1
+            continue
         try:
-            retained = sum(len(i.result.records) for i in intervals if i.result is not None)
-            replaced = len(interval.result.records) if interval.result is not None else 0
+            retained = charged_records()
+            replaced = (len(interval.result.records)
+                        if interval.sample_from_current_run and interval.result is not None else 0)
             capacity = options.max_records - retained + replaced
             if capacity <= 0:
                 raise BudgetStopped("record_budget")
             request_limit = min(options.limit, capacity)
             check_budget()
             interval.request_limit = request_limit
-            requested.append(interval)
+            requested.append((interval, interval.http_attempts))
             result = query_range(profile=profile, token=token, query=query,
                                  start_ns=interval.start_ns, end_ns=interval.end_ns,
                                  limit=request_limit, direction=direction,
@@ -164,11 +199,13 @@ def scan_range(
             interval.reasons = ["timeout" if isinstance(error, QueryTimeoutError) else "request_failed"]
         else:
             previous_result, previous_origin = interval.result, interval.sample_origin
+            previous_owner = interval.sample_from_current_run
             interval.result = replace(result, records=[
                 record for record in result.records
                 if interval.start_ns <= record.timestamp_ns < interval.end_ns
             ][:request_limit])
             interval.sample_origin = (interval.start_ns, interval.end_ns)
+            interval.sample_from_current_run = True
             interval.reasons = []
             if result.raw_entries >= request_limit:
                 interval.reasons.append("possible_truncation")
@@ -179,6 +216,7 @@ def scan_range(
             if (interval.reasons and previous_result is not None
                     and len(previous_result.records) > len(interval.result.records)):
                 interval.result, interval.sample_origin = previous_result, previous_origin
+                interval.sample_from_current_run = previous_owner
             raw_count_exact = raw_count_exact and result.raw_count_exact
             raw_entries += result.raw_entries
             skipped_entries += result.skipped.skipped_entries
@@ -195,6 +233,7 @@ def scan_range(
                             if child.start_ns <= record.timestamp_ns < child.end_ns
                         ])
                     child.sample_origin = interval.sample_origin
+                    child.sample_from_current_run = interval.sample_from_current_run
                     child.reasons = ["unqueried", *interval.reasons]
                 if direction == 'backward':
                     children.reverse()

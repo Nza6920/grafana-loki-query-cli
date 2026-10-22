@@ -227,6 +227,9 @@ def _decode(payload: Any) -> tuple[dict[str, Any], ScanOutcome]:
         _integer(usage['http_attempts'], minimum=0)
         if not isinstance(usage['elapsed_seconds'], (int, float)) or not math.isfinite(usage['elapsed_seconds']) or usage['elapsed_seconds'] < 0:
             raise ValueError('invalid usage')
+    current, cumulative = report['usage']['current'], report['usage']['cumulative']
+    if any(current[key] > cumulative[key] for key in ('http_attempts', 'elapsed_seconds')):
+        raise ValueError('inconsistent cumulative usage')
     exit_code = _integer(payload['exit_code'], minimum=0)
     if report['status'] not in ('complete', 'incomplete', 'failed') or exit_code not in (0, 3, 4):
         raise ValueError('invalid completion status')

@@ -286,6 +286,47 @@ evidence-only. Partial scans still return 4, and saved authentication failures
 return 3. Export does not refresh logs or backfill later arrivals. The saved
 intervals are observations from separate requests, not a server-side snapshot.
 
+## Resume an investigation
+
+Continue only the saved unresolved terminal intervals with an explicit original
+profile and work directory:
+
+```bash
+loki-query resume --profile prod --work-dir incident-work \
+  --max-http-attempts 20 --max-records 2000 --output jsonl --report resumed-report.json
+```
+
+Resume validates the saved schema, profile and actual endpoint/datasource before
+HTTP or token lookup, and reuses the original complete LogQL, absolute nanosecond
+bounds and fetch direction. Relative time expressions are never reevaluated.
+Changed scope requires a new investigation; `resume` accepts no query, range or
+direction flags. Current credentials are loaded from the selected profile's
+current token environment variable, so both token values and the environment
+variable name can rotate without storing credentials. An already complete scan
+makes no requests and does not require a token. Generic log scans are supported;
+trace scan resume is introduced separately.
+
+Each execution receives fresh request, elapsed and retained-record allowances.
+`--limit`, `--timeout`, execution budgets and output/report choices may change.
+Previously saved evidence does not consume the new record allowance, so merged
+exports can contain more rows than the current `--max-records`. The report's
+`usage.current` tracks this execution's attempts, elapsed time, raw/skipped
+observations and charged retained records; `usage.cumulative` tracks total
+attempts, elapsed time and observations, plus the final merged retained-record
+count. Top-level `counts` describes cumulative observations and merged evidence.
+A reserved HTTP attempt is checkpointed before dispatch and conservatively counts
+if the process stops before the response. Repeated checkpoints never re-add an
+execution's usage to cumulative totals.
+
+A new response replaces the unresolved interval's selected sample; a complete
+empty response removes its old rows. Failed requests preserve saved evidence,
+and a weaker incomplete response can retain a stronger prior sample while its
+gap remains explicit. Completed intervals stay frozen and are never implicitly
+queried again. They are observations gathered at different times, not a server
+snapshot: refreshing them or including late arrivals requires a fresh
+investigation. Resume uses the same atomic publication and exclusive writer lock
+as initial scans; offline export remains available after interruption.
+
 ## Trace timelines
 
 Use an explicitly selected profile, a single stream selector, and an explicit

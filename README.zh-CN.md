@@ -253,6 +253,36 @@ loki-query export --work-dir incident-work --output jsonl --report saved-report.
 保存的认证失败返回 3。导出不会刷新日志或补入后到数据；各区间来自独立请求，
 并不构成服务端一致性快照。
 
+## 恢复调查
+
+显式指定原 profile 与工作目录，只继续已保存的未解决终端区间：
+
+```bash
+loki-query resume --profile prod --work-dir incident-work \
+  --max-http-attempts 20 --max-records 2000 --output jsonl --report resumed-report.json
+```
+
+恢复会在 HTTP 请求或读取 token 前校验已保存的 schema、profile 与实际
+endpoint/datasource，并复用原完整 LogQL、绝对纳秒边界及获取方向，不重新计算
+相对时间表达式。变更调查范围需要新建调查；`resume` 不接受查询、时间范围或方向
+参数。凭据来自所选 profile 当前指定的 token 环境变量，因此 token 值和环境变量名
+均可轮换，无需保存凭据。已完成扫描不发请求，也不要求 token。当前支持普通日志
+扫描，trace 扫描恢复另行引入。
+
+每轮执行获得新的请求、耗时及保留记录预算，可调整 `--limit`、`--timeout`、执行
+预算及输出/report 选项。此前保存的证据不占本轮记录额度，因此合并导出条数可能
+超过当前 `--max-records`。报告的 `usage.current` 记录本轮尝试、耗时、原始及跳过
+观察数和计入本轮额度的保留记录；`usage.cumulative` 记录累计尝试、耗时与观察数，
+以及最终合并证据的保留条数。顶层 `counts` 描述累计观察与合并证据。HTTP 尝试在
+发送前预留并提交检查点；进程在收到响应前中断时保守计入该尝试。多次检查点不会
+把本轮用量重复加入累计值。
+
+新响应替换未解决区间所选的旧样本；完整的空响应会移除旧记录。请求失败保留此前
+证据；较弱的不完整响应可以继续使用此前较强样本，同时明确保留缺口。已完成区间
+保持冻结，不会隐式重查。各区间来自不同时刻的观察，并非服务端快照；刷新它们或
+补入后到日志需要新的调查。恢复沿用初次扫描的原子发布和独占写锁，中断后仍可
+离线导出。
+
 ## Trace 时间线
 
 必须显式选择 profile、单个 stream selector，以及相对或绝对时间边界：
