@@ -126,7 +126,8 @@ class ScanCliTests(unittest.TestCase):
         error = HTTPError('https://grafana.example.com', 503, 'temporary', headers, None)
         self.assertEqual(self.invoke([error, error, error, [], []]), 4)
         self.assertEqual(self.sleeps, [1.0, 1.0])
-        self.assertEqual(self.read_report()['usage']['current'], {'http_attempts': 5, 'elapsed_seconds': 2.0})
+        self.assertEqual(self.read_report()['usage']['current'], {'http_attempts': 5, 'elapsed_seconds': 2.0,
+            'raw_entries': 0, 'skipped_entries': 0, 'skipped_series': 0, 'retained_records': 0})
         self.assertEqual(len(self.read_report()['coverage']['resolved']), 2)
 
     def test_fatal_http_failures_stop_immediately_and_keep_prior_evidence(self) -> None:
@@ -169,7 +170,8 @@ class ScanCliTests(unittest.TestCase):
         self.assertEqual(self.invoke([error, [], [], []]), 0)
         self.assertEqual(self.requests[0], self.requests[1])
         self.assertEqual(self.sleeps, [0.25])
-        self.assertEqual(self.read_report()['usage']['current'], {'http_attempts': 4, 'elapsed_seconds': 0.25})
+        self.assertEqual(self.read_report()['usage']['current'], {'http_attempts': 4, 'elapsed_seconds': 0.25,
+            'raw_entries': 0, 'skipped_entries': 0, 'skipped_series': 0, 'retained_records': 0})
 
     def test_relative_range_is_frozen_at_supplied_reference_time(self) -> None:
         requests: list[dict[str, list[str]]] = []

@@ -20,6 +20,7 @@ from .client import (
     Sleeper,
     default_opener,
     query_range,
+    query_endpoint,
 )
 from .config import ConfigurationError, default_config_path, load_config
 from .persistence import WorkDirectory
@@ -161,6 +162,16 @@ def build_parser(
     export_parser.add_argument("--work-dir", required=True, help="Saved scan directory.")
     export_parser.add_argument("--output", choices=("human", "raw", "jsonl"), default="human")
     export_parser.add_argument("--report", help="Write saved completeness JSON to this file.")
+    resume_parser = subparsers.add_parser("resume", help="Continue only unresolved saved scan intervals.")
+    resume_parser.add_argument("--work-dir", required=True, help="Saved scan directory.")
+    resume_parser.add_argument("--profile", required=True, help="Explicit original target profile.")
+    resume_parser.add_argument("--limit", type=_limit, default=1000, help="Entries per request (default: 1000).")
+    resume_parser.add_argument("--max-http-attempts", type=_positive_int, default=60)
+    resume_parser.add_argument("--max-elapsed-seconds", type=_positive_float, default=300.0)
+    resume_parser.add_argument("--max-records", type=_positive_int, default=10000)
+    resume_parser.add_argument("--timeout", type=_positive_float, default=30.0)
+    resume_parser.add_argument("--output", choices=("human", "raw", "jsonl"), default="human")
+    resume_parser.add_argument("--report", help="Write current and cumulative completeness JSON.")
     profiles_parser = subparsers.add_parser(
         "profiles", help="Inspect configured profiles."
     )
@@ -289,6 +300,36 @@ def _dispatch(
         write_result(saved.result, args.output, output_stream)
         write_log_report(saved.report, args.report, error_stream, token="")
         return saved.exit_code
+    if args.command == "resume":
+        validate_report_destination(args.report)
+        with WorkDirectory(args.work_dir).writer() as work:
+            work.validate_report(args.report)
+            identity, saved = work.load()
+            config = load_config(selected_config_path)
+            profile = config.profiles.get(args.profile)
+            if profile is None:
+                raise ConfigurationError(f"Unknown profile: {args.profile!r}.")
+            target = {"endpoint": query_endpoint(profile), "datasource_uid": profile.datasource_uid}
+            if identity['profile'] != profile.name or identity['target'] != target:
+                raise ConfigurationError("Saved investigation profile or target does not match; use a fresh investigation for changed scope.")
+            if 'trace' in identity:
+                raise ConfigurationError("Trace scan resume is not supported by this command yet.")
+            resume_token = environment.get(profile.token_env, "")
+            if any(interval.reasons for interval in saved.intervals) and not resume_token:
+                raise AuthenticationError(f"token environment variable {profile.token_env!r} is not set.")
+            outcome = scan_range(
+                profile=profile, token=resume_token, query=identity['query'],
+                start_ns=int(identity['start_ns']), end_ns=int(identity['end_ns']),
+                direction=identity['direction'],
+                options=ScanOptions(limit=args.limit, max_http_attempts=args.max_http_attempts,
+                    max_elapsed_seconds=args.max_elapsed_seconds, max_records=args.max_records,
+                    timeout=args.timeout),
+                opener=opener, sleeper=sleeper, monotonic=monotonic, seed=saved,
+                progress=lambda value: work.save(value, identity=identity),
+            )
+        write_result(outcome.result, args.output, output_stream)
+        write_log_report(outcome.report, args.report, error_stream, token=resume_token)
+        return outcome.exit_code
     if args.command == "config" and args.config_command == "path":
         print(selected_config_path, file=output_stream)
     elif args.command == "config" and args.config_command == "validate":
