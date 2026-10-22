@@ -2,14 +2,14 @@
 
 [中文文档](README.zh-CN.md)
 
-A read-only CLI for querying Loki's `query_range` API through a Grafana datasource proxy. Callers declare a log or metric query and provide complete LogQL; the CLI handles profiles, time ranges, authentication, retries, global result sorting, and stable output. Version 0.2.0 adds metric range queries and loss-aware output.
+A read-only CLI for querying Loki's `query_range` API through a Grafana datasource proxy. Callers declare a log or metric query and provide complete LogQL; the CLI handles profiles, time ranges, authentication, retries, global result sorting, and stable output. Version 0.3.0 adds completeness reports, bounded adaptive scans, saved evidence with resume and offline export, and exact trace timelines.
 
 ## Installation
 
 Python 3.11 or later is required. Install the fixed GitHub release with pipx:
 
 ```bash
-pipx install "git+https://github.com/Nza6920/grafana-loki-query-cli.git@v0.2.0"
+pipx install "git+https://github.com/Nza6920/grafana-loki-query-cli.git@v0.3.0"
 loki-query --version
 ```
 
