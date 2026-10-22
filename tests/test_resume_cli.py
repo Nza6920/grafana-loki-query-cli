@@ -172,7 +172,7 @@ class ResumeCliTests(unittest.TestCase):
         cases: list[tuple[list[Any], int, list[str]]] = [
             ([[]], 0, []),
             ([[{'stream': {}, 'values': [['2', 'new'], ['2', 'new']]}]], 0, ['new', 'new']),
-            ([[{'stream': {}, 'values': [['2', 'weak'], ['invalid']]}]], 4, ['old', 'old']),
+            ([[{'stream': {}, 'values': [['2', 'new-valid'], ['invalid']]}]], 4, ['new-valid']),
             ([failure, failure, failure], 4, ['old', 'old']),
         ]
         for index, (responses, expected_code, expected_lines) in enumerate(cases):
@@ -184,10 +184,15 @@ class ResumeCliTests(unittest.TestCase):
                 code, output, error, report = self.invoke('resume', responses)
                 self.assertEqual(code, expected_code, error)
                 self.assertEqual([json.loads(line)['line'] for line in output.splitlines()], expected_lines)
-                code, exported, error, _ = self.invoke('export', [])
+                code, exported, error, exported_report = self.invoke('export', [])
                 self.assertEqual(code, expected_code, error)
                 self.assertEqual(exported, output)
                 self.assertEqual(report['usage']['current']['raw_entries'], 0 if index in (0, 3) else 2)
+                if index == 2:
+                    self.assertEqual(report['status'], 'incomplete')
+                    self.assertEqual(report['usage']['current']['retained_records'], 1)
+                    self.assertEqual(exported_report['status'], 'incomplete')
+                    self.assertEqual(exported_report['counts']['valid_records'], 1)
 
     def test_resume_queries_only_unresolved_odd_nanosecond_child(self) -> None:
         parent = [{'stream': {}, 'values': [['1', 'old'], ['1', 'old'], ['2000000001', 'boundary']]}]
@@ -203,3 +208,23 @@ class ResumeCliTests(unittest.TestCase):
         self.assertEqual(report['usage']['current']['http_attempts'], 1)
         self.assertEqual(report['usage']['cumulative']['http_attempts'], 3)
         self.assertEqual(self.invoke('export', [])[1], output)
+
+    def test_repeated_partial_resumes_replace_without_appending_and_keep_duplicates(self) -> None:
+        initial = [{'stream': {}, 'values': [['1', 'old'], ['1', 'old']]}]
+        self.assertEqual(self.invoke('query', [initial], '--since', '1s', '--limit', '2',
+            now=datetime(1970, 1, 1, 0, 0, 1, tzinfo=UTC))[0], 4)
+        for values, expected in [
+            ([['2', 'new-valid'], ['invalid']], ['new-valid']),
+            ([['3', 'repeated'], ['3', 'repeated'], ['invalid']], ['repeated', 'repeated']),
+            ([['invalid']], []),
+        ]:
+            with self.subTest(expected=expected):
+                code, output, error, report = self.invoke('resume', [[{'stream': {}, 'values': values}]])
+                self.assertEqual(code, 4, error)
+                self.assertEqual([json.loads(line)['line'] for line in output.splitlines()], expected)
+                self.assertEqual(report['usage']['current']['retained_records'], len(expected))
+                self.assertEqual(report['usage']['cumulative']['retained_records'], len(expected))
+                code, exported, error, exported_report = self.invoke('export', [])
+                self.assertEqual(code, 4, error)
+                self.assertEqual(exported, output)
+                self.assertEqual(exported_report['status'], 'incomplete')

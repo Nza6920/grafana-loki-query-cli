@@ -211,9 +211,9 @@ def scan_range(
                 interval.reasons.append("possible_truncation")
             if result.skipped.incomplete or not result.raw_count_exact:
                 interval.reasons.append("parse_loss")
-            # An incomplete replacement may contain less usable evidence than its
-            # inherited sample. Keep one sample by provenance, never concatenate.
-            if (interval.reasons and previous_result is not None
+            # Preserve stronger parent evidence inherited within this execution.
+            # A resumed response always replaces the saved baseline sample.
+            if (interval.reasons and previous_owner and previous_result is not None
                     and len(previous_result.records) > len(interval.result.records)):
                 interval.result, interval.sample_origin = previous_result, previous_origin
                 interval.sample_from_current_run = previous_owner
