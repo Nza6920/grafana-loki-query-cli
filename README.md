@@ -248,8 +248,43 @@ network results and valid counts describe the final retained evidence.
 Authentication and invalid-query failures stop immediately, retaining earlier
 evidence and reporting remaining work. Reports identify `http_attempt_budget`, `elapsed_time_budget`, and
 `record_budget` stops. Unresolved scans return 4, authentication returns 3,
-and configuration errors return 2. Scans do not write log archives; only an
-explicit `--report` writes completeness metadata.
+and configuration errors return 2. Without `--work-dir`, scans do not write log
+archives; an explicit `--report` writes only completeness metadata.
+
+## Saved scan evidence and offline export
+
+Opt into durable progress and captured log evidence with `query --scan --work-dir`:
+
+```bash
+loki-query query --profile prod --since 1h --scan --work-dir incident-work \
+  --output jsonl '{namespace="prod",app="api"}'
+loki-query export --work-dir incident-work --output jsonl --report saved-report.json
+```
+
+Use a new, dedicated directory for each investigation. The versioned checkpoint
+binds profile, actual endpoint/datasource, complete LogQL, frozen absolute
+nanosecond bounds, fetch direction and result schema. It stores terminal interval
+states, sample provenance, original log lines/labels and multiplicity, request
+history and execution accounting. Authentication headers and token values are
+never included as credentials. Captured log contents remain original evidence.
+
+Each checkpoint contains its evidence and completion state in one checksummed
+file, flushed and atomically replaced. Progress is committed before each HTTP
+attempt and after interval transitions, so a stopped process retains completed
+intervals and conservatively charges an in-flight attempt. Interrupted publication
+leaves the preceding committed checkpoint usable; incomplete temporary files do
+not count as completed work. An OS writer lock rejects concurrent scans and is
+released automatically if the process dies. Corrupt, missing or unsupported state
+is rejected rather than treated as a completed scan. The state file and lock are
+reserved and cannot be selected as a report destination.
+
+`export` requires no configuration, token or HTTP access. It reconstructs retained
+interval evidence in generic-query descending order, without combining parent
+and child observations or deduplicating genuine repeats. Its stderr summary and
+optional JSON report carry the saved coverage, gap reasons and usage; JSONL stays
+evidence-only. Partial scans still return 4, and saved authentication failures
+return 3. Export does not refresh logs or backfill later arrivals. The saved
+intervals are observations from separate requests, not a server-side snapshot.
 
 ## Trace timelines
 

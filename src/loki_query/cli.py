@@ -22,9 +22,10 @@ from .client import (
     query_range,
 )
 from .config import ConfigurationError, default_config_path, load_config
+from .persistence import WorkDirectory
 from .output import write_result
 from .reporting import log_report, validate_report_destination, write_log_report
-from .scanning import ScanOptions, scan_range
+from .scanning import ScanOptions, ScanOutcome, scan_range
 from .time_range import TimeRangeError, resolve_time_range
 from .trace import configure_trace_parser, run_trace
 
@@ -149,12 +150,17 @@ def build_parser(
     query_parser.add_argument("--max-http-attempts", type=_positive_int, help="Scan HTTP attempt budget (default: 60).")
     query_parser.add_argument("--max-elapsed-seconds", type=_positive_float, help="Scan elapsed budget (default: 300).")
     query_parser.add_argument("--max-records", type=_positive_int, help="Scan retained record budget (default: 10000).")
+    query_parser.add_argument("--work-dir", help="Persist scan progress and evidence in this explicit directory.")
     query_parser.add_argument("--report", help="Write log completeness JSON to this file.")
     query_parser.add_argument("logql", help="Complete LogQL query, or - to read stdin.")
     configure_trace_parser(
         subparsers.add_parser("trace", help="Query exact trace IDs and show a timeline."),
         limit_type=_limit, timeout_type=_positive_float,
     )
+    export_parser = subparsers.add_parser("export", help="Export a saved scan without configuration, credentials, or HTTP.")
+    export_parser.add_argument("--work-dir", required=True, help="Saved scan directory.")
+    export_parser.add_argument("--output", choices=("human", "raw", "jsonl"), default="human")
+    export_parser.add_argument("--report", help="Write saved completeness JSON to this file.")
     profiles_parser = subparsers.add_parser(
         "profiles", help="Inspect configured profiles."
     )
@@ -275,6 +281,14 @@ def _dispatch(
         if args.config
         else default_config_path(environ=environment)
     )
+    if args.command == "export":
+        validate_report_destination(args.report)
+        work = WorkDirectory(args.work_dir)
+        work.validate_report(args.report)
+        _, saved = work.load()
+        write_result(saved.result, args.output, output_stream)
+        write_log_report(saved.report, args.report, error_stream, token="")
+        return saved.exit_code
     if args.command == "config" and args.config_command == "path":
         print(selected_config_path, file=output_stream)
     elif args.command == "config" and args.config_command == "validate":
@@ -299,6 +313,7 @@ def _dispatch(
             ("--max-http-attempts", args.max_http_attempts),
             ("--max-elapsed-seconds", args.max_elapsed_seconds),
             ("--max-records", args.max_records),
+            ("--work-dir", args.work_dir),
         ) if value is not None]
         if args.scan:
             scan_flags.append("--scan")
@@ -344,15 +359,23 @@ def _dispatch(
             now=now,
         )
         if args.scan:
-            outcome = scan_range(
-                profile=profile, token=token, query=query.strip(), start_ns=start_ns, end_ns=end_ns,
-                direction=args.direction or "backward",
-                options=ScanOptions(limit=args.limit or 1000,
-                    max_http_attempts=args.max_http_attempts or 60,
-                    max_elapsed_seconds=args.max_elapsed_seconds or 300.0,
-                    max_records=args.max_records or 10000, timeout=args.timeout),
-                opener=opener, sleeper=sleeper, monotonic=monotonic,
-            )
+            def execute_scan(progress: Callable[[ScanOutcome], None] | None = None) -> ScanOutcome:
+                return scan_range(
+                    profile=profile, token=token, query=query.strip(), start_ns=start_ns, end_ns=end_ns,
+                    direction=args.direction or "backward",
+                    options=ScanOptions(limit=args.limit or 1000,
+                        max_http_attempts=args.max_http_attempts or 60,
+                        max_elapsed_seconds=args.max_elapsed_seconds or 300.0,
+                        max_records=args.max_records or 10000, timeout=args.timeout),
+                    opener=opener, sleeper=sleeper, monotonic=monotonic, progress=progress,
+                )
+            if args.work_dir is not None:
+                with WorkDirectory(args.work_dir).writer() as work:
+                    work.validate_report(args.report)
+                    work.require_new()
+                    outcome = execute_scan(work.save)
+            else:
+                outcome = execute_scan()
             write_result(outcome.result, args.output, output_stream)
             write_log_report(outcome.report, args.report, error_stream, token=token)
             return outcome.exit_code

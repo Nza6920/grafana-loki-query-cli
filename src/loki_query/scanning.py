@@ -48,7 +48,7 @@ class ScanOutcome:
 def scan_range(
     *, profile: Profile, token: str, query: str, start_ns: int, end_ns: int,
     direction: str, options: ScanOptions, opener: Opener, sleeper: Sleeper,
-    monotonic: Callable[[], float],
+    monotonic: Callable[[], float], progress: Callable[[ScanOutcome], None] | None = None,
 ) -> ScanOutcome:
     started = monotonic()
     attempts = 0
@@ -63,6 +63,46 @@ def scan_range(
     raw_entries = skipped_entries = skipped_series = 0
     raw_count_exact = True
 
+    def snapshot() -> ScanOutcome:
+        records: list[Record] = [record for i in intervals if i.result is not None for record in i.result.records]
+        combined = QueryResult('log', sorted(records, key=lambda record: record.timestamp_ns, reverse=True),
+                               ParseSummary(skipped_series, skipped_entries), raw_entries, raw_count_exact)
+        report = log_report(profile=profile, query=query, start_ns=start_ns, end_ns=end_ns,
+                            direction=direction, limit=options.limit, result=combined,
+                            attempts=attempts, elapsed_seconds=max(0.0, monotonic() - started), timeout=options.timeout)
+
+        def coverage_interval(item: ScanInterval) -> dict[str, Any]:
+            coverage: dict[str, Any] = {
+                'start_ns': str(item.start_ns), 'end_ns': str(item.end_ns),
+                'http_attempts': item.http_attempts, 'request_limit': item.request_limit,
+                'retained_records': len(item.result.records) if item.result is not None else 0,
+                'sample_origin': ({'start_ns': str(item.sample_origin[0]), 'end_ns': str(item.sample_origin[1])}
+                                  if item.sample_origin is not None else None),
+            }
+            if item.reasons:
+                coverage['reasons'] = list(item.reasons)
+            return coverage
+
+        report['coverage'] = {
+            'resolved': [coverage_interval(i) for i in intervals if not i.reasons],
+            'unresolved': [coverage_interval(i) for i in intervals if i.reasons],
+        }
+        report['requests'] = [{'start_ns': str(i.start_ns), 'end_ns': str(i.end_ns),
+                               'http_attempts': i.http_attempts, 'request_limit': i.request_limit,
+                               'reasons': list(i.reasons)} for i in requested if i.http_attempts]
+        report['status'] = 'failed' if fatal_code else 'incomplete' if report['coverage']['unresolved'] else 'complete'
+        report['stop_reasons'] = stop_reasons
+        report['budgets'] = {'max_http_attempts': options.max_http_attempts,
+                             'max_elapsed_seconds': options.max_elapsed_seconds,
+                             'max_records': options.max_records, 'request_timeout_seconds': options.timeout}
+        return ScanOutcome(combined, report, fatal_code or (4 if report['coverage']['unresolved'] else 0), intervals)
+
+    def checkpoint() -> None:
+        if progress is not None:
+            progress(snapshot())
+
+    checkpoint()
+
     def check_budget() -> float:
         if attempts >= options.max_http_attempts:
             raise BudgetStopped("http_attempt_budget")
@@ -73,9 +113,17 @@ def scan_range(
 
     def bounded_opener(request: Request, timeout: float) -> ReadableResponse:
         nonlocal attempts
-        remaining = check_budget()
+        check_budget()
         attempts += 1
         interval.http_attempts += 1
+        checkpoint()
+        # Durable checkpoint I/O consumes elapsed time too. Recheck after
+        # publication so a slow disk cannot permit an over-budget request.
+        remaining = options.max_elapsed_seconds - (monotonic() - started)
+        if remaining <= 0:
+            attempts -= 1
+            interval.http_attempts -= 1
+            raise BudgetStopped("elapsed_time_budget")
         return opener(request, min(timeout, remaining))
 
     def bounded_sleep(seconds: float) -> None:
@@ -151,42 +199,14 @@ def scan_range(
                 if direction == 'backward':
                     children.reverse()
                 intervals[position:position + 1] = children
+                checkpoint()
                 continue
             interval.reasons.append("minimum_interval")
         position += 1
+        checkpoint()
     if stop_reasons:
         for interval in intervals:
             if "unqueried" in interval.reasons:
                 interval.reasons.extend(reason for reason in stop_reasons if reason not in interval.reasons)
-    records: list[Record] = [record for i in intervals if i.result is not None for record in i.result.records]
-    combined = QueryResult('log', sorted(records, key=lambda record: record.timestamp_ns, reverse=True),
-                           ParseSummary(skipped_series, skipped_entries), raw_entries, raw_count_exact)
-    report = log_report(profile=profile, query=query, start_ns=start_ns, end_ns=end_ns,
-                        direction=direction, limit=options.limit, result=combined,
-                        attempts=attempts, elapsed_seconds=max(0.0, monotonic() - started), timeout=options.timeout)
-
-    def coverage_interval(item: ScanInterval) -> dict[str, Any]:
-        coverage: dict[str, Any] = {
-            'start_ns': str(item.start_ns), 'end_ns': str(item.end_ns),
-            'http_attempts': item.http_attempts, 'request_limit': item.request_limit,
-            'retained_records': len(item.result.records) if item.result is not None else 0,
-            'sample_origin': ({'start_ns': str(item.sample_origin[0]), 'end_ns': str(item.sample_origin[1])}
-                              if item.sample_origin is not None else None),
-        }
-        if item.reasons:
-            coverage['reasons'] = list(item.reasons)
-        return coverage
-
-    report['coverage'] = {
-        'resolved': [coverage_interval(i) for i in intervals if not i.reasons],
-        'unresolved': [coverage_interval(i) for i in intervals if i.reasons],
-    }
-    report['requests'] = [{'start_ns': str(i.start_ns), 'end_ns': str(i.end_ns),
-                           'http_attempts': i.http_attempts, 'request_limit': i.request_limit,
-                           'reasons': list(i.reasons)} for i in requested if i.http_attempts]
-    report['status'] = 'failed' if fatal_code else 'incomplete' if report['coverage']['unresolved'] else 'complete'
-    report['stop_reasons'] = stop_reasons
-    report['budgets'] = {'max_http_attempts': options.max_http_attempts,
-                         'max_elapsed_seconds': options.max_elapsed_seconds,
-                         'max_records': options.max_records, 'request_timeout_seconds': options.timeout}
-    return ScanOutcome(combined, report, fatal_code or (4 if report['coverage']['unresolved'] else 0), intervals)
+    checkpoint()
+    return snapshot()
