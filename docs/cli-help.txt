@@ -61,8 +61,8 @@ usage: loki-query trace [-h] --profile PROFILE --selector SELECTOR
                         (--since SINCE | --start START) [--end END]
                         [--limit LIMIT] [--direction {backward,forward}]
                         [--output {human,raw,jsonl}]
-                        [--service-field SERVICE_FIELD] [--timeout TIMEOUT]
-                        [--report REPORT]
+                        [--service-field SERVICE_FIELD] [--field NAME]
+                        [--path POINTER] [--timeout TIMEOUT] [--report REPORT]
                         trace_id
 
 positional arguments:
@@ -80,6 +80,10 @@ options:
   --output {human,raw,jsonl}
   --service-field SERVICE_FIELD
                         Returned service label (default: app).
+  --field NAME          Literal top-level JSON field; repeat to match any
+                        selected field.
+  --path POINTER        JSON Pointer to nested object members; repeat to match
+                        any selected path.
   --timeout TIMEOUT
   --report REPORT       Write trace completeness JSON to this file.
 
