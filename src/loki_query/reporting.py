@@ -58,7 +58,7 @@ def validate_report_destination(destination: str | None) -> None:
 
 
 def _redact(value: Any, token: str) -> Any:
-    if isinstance(value, str):
+    if isinstance(value, str) and token:
         return value.replace(token, "[REDACTED]")
     if isinstance(value, list):
         return [_redact(item, token) for item in value]

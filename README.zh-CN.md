@@ -222,7 +222,36 @@ loki-query query --profile prod --since 1h --scan \
 认证失败和无效查询立即停止，保留
 此前证据并报告剩余工作。报告用 `http_attempt_budget`、`elapsed_time_budget`、
 `record_budget` 标明预算停止原因。扫描存在未解决区间时退出码为 4，认证失败为 3，
-配置错误为 2。扫描不会写入日志档案；只有显式 `--report` 会写入完整性元数据。
+配置错误为 2。未指定 `--work-dir` 时扫描不会写入日志档案；显式 `--report`
+只写入完整性元数据。
+
+## 保存扫描证据与离线导出
+
+通过 `query --scan --work-dir` 显式启用持久化进度及日志证据：
+
+```bash
+loki-query query --profile prod --since 1h --scan --work-dir incident-work \
+  --output jsonl '{namespace="prod",app="api"}'
+loki-query export --work-dir incident-work --output jsonl --report saved-report.json
+```
+
+每次调查使用新的专用目录。带版本的检查点绑定 profile、实际 endpoint/datasource、
+完整 LogQL、已冻结的绝对纳秒范围、获取方向及结果 schema，并保存终端区间状态、
+样本来源、原始日志文本与标签及真实重复记录、请求历史和执行用量。
+不会把认证头和 token 值作为凭据保存；捕获的日志内容保留为原始证据。
+
+每个检查点用一份带校验和的文件同时保存证据和完成状态，刷新后原子替换。
+每次 HTTP 尝试前及区间转换后提交进度；进程中断时保留已完成区间，并保守计入
+正在执行的尝试。发布中断后仍可使用此前提交的检查点；不完整临时文件不会被视为
+已完成工作。操作系统写锁拒绝并发扫描，进程死亡后自动释放。缺失、损坏或不兼容
+状态会明确拒绝，不会当作完整扫描。状态文件与锁文件保留给扫描，不能作为 report
+输出目标。
+
+`export` 无需配置、token 或 HTTP 访问。它按普通查询的全局降序重建保留证据，
+不拼接父子区间的重复观察，也不去除真实重复记录。stderr 摘要和可选 JSON 报告
+携带已保存的覆盖范围、缺口原因和用量；JSONL 只包含证据。不完整扫描仍返回 4，
+保存的认证失败返回 3。导出不会刷新日志或补入后到数据；各区间来自独立请求，
+并不构成服务端一致性快照。
 
 ## Trace 时间线
 
