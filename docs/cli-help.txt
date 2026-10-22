@@ -66,12 +66,14 @@ options:
 
 $ loki-query export --help
 usage: loki-query export [-h] --work-dir WORK_DIR [--output {human,raw,jsonl}]
-                         [--report REPORT]
+                         [--service-field SERVICE_FIELD] [--report REPORT]
 
 options:
   -h, --help            show this help message and exit
   --work-dir WORK_DIR   Saved scan directory.
   --output {human,raw,jsonl}
+  --service-field SERVICE_FIELD
+                        Trace service label for human output.
   --report REPORT       Write saved completeness JSON to this file.
 
 $ loki-query resume --help
@@ -80,7 +82,10 @@ usage: loki-query resume [-h] --work-dir WORK_DIR --profile PROFILE
                          [--max-http-attempts MAX_HTTP_ATTEMPTS]
                          [--max-elapsed-seconds MAX_ELAPSED_SECONDS]
                          [--max-records MAX_RECORDS] [--timeout TIMEOUT]
-                         [--output {human,raw,jsonl}] [--report REPORT]
+                         [--output {human,raw,jsonl}]
+                         [--service-field SERVICE_FIELD] [--trace-id TRACE_ID]
+                         [--source {json,label}] [--selector SELECTOR]
+                         [--field FIELDS] [--path PATHS] [--report REPORT]
 
 options:
   -h, --help            show this help message and exit
@@ -94,6 +99,14 @@ options:
   --max-records MAX_RECORDS
   --timeout TIMEOUT
   --output {human,raw,jsonl}
+  --service-field SERVICE_FIELD
+                        Trace service label for human output.
+  --trace-id TRACE_ID   Assert the saved trace ID without changing scope.
+  --source {json,label}
+                        Assert the saved trace source.
+  --selector SELECTOR   Assert the saved trace selector.
+  --field FIELDS        Assert the saved trace field mapping.
+  --path PATHS          Assert the saved trace JSON Pointer mapping.
   --report REPORT       Write current and cumulative completeness JSON.
 
 $ loki-query trace --help
@@ -104,7 +117,9 @@ usage: loki-query trace [-h] --profile PROFILE --selector SELECTOR
                         [--output {human,raw,jsonl}]
                         [--service-field SERVICE_FIELD] [--field NAME]
                         [--path POINTER] [--timeout TIMEOUT]
-                        [--max-http-attempts MAX_HTTP_ATTEMPTS]
+                        [--max-http-attempts MAX_HTTP_ATTEMPTS] [--scan]
+                        [--max-elapsed-seconds MAX_ELAPSED_SECONDS]
+                        [--max-records MAX_RECORDS] [--work-dir WORK_DIR]
                         [--report REPORT]
                         trace_id
 
@@ -121,7 +136,8 @@ options:
   --since SINCE         Relative duration such as 15m.
   --start START         RFC 3339 range start.
   --end END             RFC 3339 range end (default: now).
-  --limit LIMIT         Maximum candidates (1-5000; default: 100).
+  --limit LIMIT         Maximum candidates per request (1-5000; default: 100,
+                        scan: 1000).
   --direction {backward,forward}
   --output {human,raw,jsonl}
   --service-field SERVICE_FIELD
@@ -134,6 +150,13 @@ options:
   --max-http-attempts MAX_HTTP_ATTEMPTS
                         HTTP attempt ceiling including retries; explicit cap
                         emits stderr accounting.
+  --scan                Use the shared bounded adaptive scan engine.
+  --max-elapsed-seconds MAX_ELAPSED_SECONDS
+                        Scan elapsed budget (default: 300).
+  --max-records MAX_RECORDS
+                        Scan retained candidate budget (default: 10000).
+  --work-dir WORK_DIR   Persist trace scan candidates and progress in this
+                        directory.
   --report REPORT       Write trace completeness JSON to this file.
 
 $ loki-query config --help

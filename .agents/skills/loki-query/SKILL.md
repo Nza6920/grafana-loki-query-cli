@@ -25,9 +25,17 @@ Resolve command syntax and type-specific options from CLI help and the
    window. Choose a log query unless the user
    explicitly needs a metric aggregation; declare metrics with
    `--query-type metric`. Use JSONL for evidence. Use `trace` for an explicitly
-   scoped exact trace search and `--scan` only when bounded automatic scanning
-   is needed. For `resume`, inspect the saved report first and retain its
+   scoped exact trace search. Select JSON body (default) or explicit labels;
+   resolve custom literal fields, JSON Pointers and service naming from CLI help.
+   A custom mapping replaces the default fields; match only complete case-sensitive
+   strings from the selected source. Use `--scan` only when bounded automatic
+   scanning is needed; every trace source shares the generic scan engine.
+   For `resume`, inspect the saved report first and retain its
    profile, target, query/trace identity, and frozen absolute time range.
+   Trace identity includes ID, source, selector and canonical field mapping;
+   changed scope starts a fresh investigation. Display/service fields and budgets
+   may change. Resume only unresolved intervals; offline `export` uses saved
+   evidence and identity without networking or credentials.
    Cap every range at 24 hours; a range beyond one hour requires explicit
    approval in the current request. Obtain explicit authorization before
    changing profiles. Show the profile, actual target, exact time window, and
@@ -54,7 +62,11 @@ Resolve command syntax and type-specific options from CLI help and the
 4. Follow evidence within the settled ledger. Empty successful, resolved
    retrieval means no matches under the selected conditions. Saturation,
    parse loss, unresolved intervals, or errors leave retrieval gaps; stdout
-   may still hold valid partial evidence. Exit `4` does not erase that evidence,
+   may still hold valid partial evidence. Trace coverage and record budgets count
+   candidates before exact matching, so zero matched rows can still have gaps.
+   Persist only with an explicitly selected dedicated work directory. For saved
+   traces, retain candidate evidence and report the frozen predicate; validate
+   loaded identity before resume or export. Exit `4` does not erase that evidence,
    and ordinary saturation can retain exit `0`. Refine or resume only to answer
    an identified remaining question, state the reason, and return to step 2.
    Exhausted HTTP allowance stops networking; saved evidence remains available
@@ -69,4 +81,8 @@ Resolve command syntax and type-specific options from CLI help and the
    consumption from reserved charges. Keep credentials and irrelevant production
    content out of the report. Complete when every conclusion traces to returned
    evidence, every executed invocation is settled, and every retrieval or
-   resource gap is explicit.
+   resource gap is explicit. Trace timelines are ascending with original lines,
+   labels and real duplicates preserved; equal timestamps do not establish
+   causality. No matches means none under the selected conditions and observed
+   coverage, not proof of event absence, ingestion completeness, a complete
+   request lifecycle or a server snapshot.

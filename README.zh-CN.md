@@ -207,10 +207,10 @@ HTTP attempt accounting: used=2 cap=57
 
 ## 有界分段扫描
 
-显式添加 `--scan` 才会扫描日志查询的时间范围。完整 LogQL、profile 和查询范围
+显式为日志查询或 trace 调查添加 `--scan` 才会自动扫描时间范围。完整 LogQL、profile 和查询范围
 保持不变。相对时间只解析一次；RFC 3339 边界保留纳秒精度，支持不足一秒的范围。
 扫描按最长 15 分钟的连续半开区间切分，最后一个区间可以更短。请求串行执行，
-默认优先查询最新区间，`--direction forward` 则优先最早区间；日志展示始终全局降序。
+默认优先查询最新区间，`--direction forward` 则优先最早区间；普通日志全局降序，trace 时间线升序。
 
 ```bash
 loki-query query --profile prod --since 1h --scan \
@@ -224,7 +224,7 @@ loki-query query --profile prod --since 1h --scan \
 `--max-elapsed-seconds` 和 `--max-records` 要求同时启用 `--scan`，
 扫描专用参数与指标查询组合时会在联网前拒绝。`--max-http-attempts` 也适用于
 普通查询和 trace，详见上文。
-普通查询仍默认 limit 为 100，保持原有行为。
+普通查询和未启用扫描的 trace 仍默认 limit 为 100，保持原有行为。
 
 每次 HTTP 超时都受剩余时间预算约束。若重试等待会耗尽剩余时间，扫描直接停止，
 不执行等待；尝试次数耗尽后也不会等待重试。可重试 HTTP 响应每个区间最多重试
@@ -253,7 +253,7 @@ loki-query query --profile prod --since 1h --scan \
 
 ## 保存扫描证据与离线导出
 
-通过 `query --scan --work-dir` 显式启用持久化进度及日志证据：
+通过 `query --scan --work-dir` 或 `trace --scan --work-dir` 显式启用持久化进度及候选日志证据：
 
 ```bash
 loki-query query --profile prod --since 1h --scan --work-dir incident-work \
@@ -273,7 +273,7 @@ loki-query export --work-dir incident-work --output jsonl --report saved-report.
 状态会明确拒绝，不会当作完整扫描。状态文件与锁文件保留给扫描，不能作为 report
 输出目标。
 
-`export` 无需配置、token 或 HTTP 访问。它按普通查询的全局降序重建保留证据，
+`export` 无需配置、token 或 HTTP 访问。它将普通查询的保留证据按全局降序、trace 证据按升序重建，
 不拼接父子区间的重复观察，也不去除真实重复记录。stderr 摘要和可选 JSON 报告
 携带已保存的覆盖范围、缺口原因和用量；JSONL 只包含证据。不完整扫描仍返回 4，
 保存的认证失败返回 3。导出不会刷新日志或补入后到数据；各区间来自独立请求，
@@ -292,8 +292,8 @@ loki-query resume --profile prod --work-dir incident-work \
 endpoint/datasource，并复用原完整 LogQL、绝对纳秒边界及获取方向，不重新计算
 相对时间表达式。变更调查范围需要新建调查；`resume` 不接受查询、时间范围或方向
 参数。凭据来自所选 profile 当前指定的 token 环境变量，因此 token 值和环境变量名
-均可轮换，无需保存凭据。已完成扫描不发请求，也不要求 token。当前支持普通日志
-扫描，trace 扫描恢复另行引入。
+均可轮换，无需保存凭据。已完成扫描不发请求，也不要求 token。普通日志和所有
+trace 来源模式共用扫描引擎及检查点校验。
 
 每轮执行获得新的请求、耗时及保留记录预算，可调整 `--limit`、`--timeout`、执行
 预算及输出/report 选项。此前保存的证据不占本轮记录额度，因此合并导出条数可能
@@ -366,12 +366,46 @@ CLI 在原始 selector 后追加精确 OR 标签过滤器，安全引用 ID，�
 `--output raw` 保留原始文本，`--output jsonl` 保持现有 `log_entry` schema，
 不混入摘要行。
 
-命令执行一次有界逻辑请求（包含现有 HTTP 重试），默认 `--limit 100`、
+未启用 `--scan` 时，命令执行一次有界逻辑请求（包含现有 HTTP 重试），默认 `--limit 100`、
 `--direction backward`；获取方向不改变时间线升序展示。完整性及 limit 饱和均按
 **原始候选记录**计算，即使没有候选匹配 ID。独立报告保留候选计数，增加
 `matched_records`、`filtered_candidates` 及精确 trace 身份。stderr 的无匹配提示
 限定为所选条件，并声明候选检索是否完整。仅饱和仍返回 0；API 解析损失保留有效
 证据并返回 4。完整检索及无匹配均不证明日志采集完整性或业务事件不存在。
+
+### 扫描、保存、恢复及导出时间线
+
+默认 JSON 字段、自定义字面字段/JSON Pointer 和显式标签来源，均支持相同的
+`--scan`。共用引擎处理最长 15 分钟区间、自适应细分、重试、覆盖信息和所有预算。
+扫描默认每次请求 limit 为 1000；未启用扫描的 trace 查询仍为 100。
+获取方向不改变 human、raw 或 JSONL 的升序展示。
+
+```bash
+loki-query trace --profile uat --selector '{namespace="apps",app=~"api|worker"}' \
+  --since 30m --scan --work-dir trace-work --max-http-attempts 20 \
+  --max-records 2000 --output jsonl --report trace-scan.json 'your-trace-id'
+loki-query resume --profile uat --work-dir trace-work --trace-id 'your-trace-id' \
+  --max-http-attempts 10 --service-field service_name --output human
+loki-query export --work-dir trace-work --output jsonl --report trace-export.json
+```
+
+Trace 检查点保存原始**候选**日志及标签、精确 ID、来源、原始 selector、规范化字段
+映射和实际服务端查询。覆盖、饱和、细分及记录额度均按本地匹配前的候选计算；即使
+没有确认匹配，也可能耗尽记录预算并留下不完整时间线。报告区分累计网络观察、保留
+候选及匹配条数；被 trace 谓词排除的候选不算 API 解析损失。父子区间替换保留真实
+重复记录。
+
+恢复在读取 token 或 HTTP 前校验 trace 身份和查询一致性；导出无需配置和凭据，
+执行相同的语义校验。恢复可选传入 `--trace-id`、`--source`、`--selector`、
+`--field` 和 `--path` 作为已保存身份的断言，必须匹配已冻结调查。
+等价的规范化映射允许字段重排或重复。变更 ID、来源、selector 或映射需要新的工作
+目录。输出格式、`--service-field`、超时和执行预算可调整。只查询未解决区间，已完成
+证据保持冻结。每个检查点（包括首个请求中断时）均携带 trace 身份和覆盖状态。
+
+离线导出对已保存候选应用已保存谓词，按时间展示相同证据，保留重复行、原始标签和
+文本。不完整档案导出后仍不完整。所选范围内完整检索只确定已观察候选中的匹配
+子集，不证明完整请求生命周期、因果、日志采集完整性或服务端一致性快照。
+补入后到日志需要新的调查。
 
 ## Skill
 

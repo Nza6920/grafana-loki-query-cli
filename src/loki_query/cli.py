@@ -29,7 +29,8 @@ from .output import write_result
 from .reporting import log_report, validate_report_destination, write_log_report
 from .scanning import ScanOptions, ScanOutcome, scan_range
 from .time_range import TimeRangeError, resolve_time_range
-from .trace import configure_trace_parser, run_trace
+from .trace import (annotate_trace, configure_trace_parser, run_trace,
+                    validate_trace_resume, write_trace_outcome)
 
 
 EXIT_CONFIG = 2
@@ -162,6 +163,7 @@ def build_parser(
     export_parser = subparsers.add_parser("export", help="Export a saved scan without configuration, credentials, or HTTP.")
     export_parser.add_argument("--work-dir", required=True, help="Saved scan directory.")
     export_parser.add_argument("--output", choices=("human", "raw", "jsonl"), default="human")
+    export_parser.add_argument("--service-field", default="app", help="Trace service label for human output.")
     export_parser.add_argument("--report", help="Write saved completeness JSON to this file.")
     resume_parser = subparsers.add_parser("resume", help="Continue only unresolved saved scan intervals.")
     resume_parser.add_argument("--work-dir", required=True, help="Saved scan directory.")
@@ -172,6 +174,12 @@ def build_parser(
     resume_parser.add_argument("--max-records", type=_positive_int, default=10000)
     resume_parser.add_argument("--timeout", type=_positive_float, default=30.0)
     resume_parser.add_argument("--output", choices=("human", "raw", "jsonl"), default="human")
+    resume_parser.add_argument("--service-field", default="app", help="Trace service label for human output.")
+    resume_parser.add_argument("--trace-id", help="Assert the saved trace ID without changing scope.")
+    resume_parser.add_argument("--source", choices=("json", "label"), help="Assert the saved trace source.")
+    resume_parser.add_argument("--selector", help="Assert the saved trace selector.")
+    resume_parser.add_argument("--field", dest="fields", action="append", help="Assert the saved trace field mapping.")
+    resume_parser.add_argument("--path", dest="paths", action="append", help="Assert the saved trace JSON Pointer mapping.")
     resume_parser.add_argument("--report", help="Write current and cumulative completeness JSON.")
     profiles_parser = subparsers.add_parser(
         "profiles", help="Inspect configured profiles."
@@ -316,6 +324,10 @@ def _dispatch(
         work = WorkDirectory(args.work_dir)
         work.validate_report(args.report)
         _, saved = work.load()
+        if 'trace' in saved.report:
+            if not args.service_field.strip():
+                raise ConfigurationError('Service field must not be empty.')
+            return write_trace_outcome(saved, args, output_stream, error_stream, token="")
         write_result(saved.result, args.output, output_stream)
         write_log_report(saved.report, args.report, error_stream, token="")
         return saved.exit_code
@@ -331,8 +343,14 @@ def _dispatch(
             target = {"endpoint": query_endpoint(profile), "datasource_uid": profile.datasource_uid}
             if identity['profile'] != profile.name or identity['target'] != target:
                 raise ConfigurationError("Saved investigation profile or target does not match; use a fresh investigation for changed scope.")
-            if 'trace' in identity:
-                raise ConfigurationError("Trace scan resume is not supported by this command yet.")
+            metadata = identity.get('trace')
+            validate_trace_resume(args, metadata)
+            if not args.service_field.strip():
+                raise ConfigurationError('Service field must not be empty.')
+            def save_progress(value: ScanOutcome) -> None:
+                if metadata is not None:
+                    annotate_trace(value, metadata)
+                work.save(value, identity=identity)
             resume_token = environment.get(profile.token_env, "")
             if any(interval.reasons for interval in saved.intervals) and not resume_token:
                 raise AuthenticationError(f"token environment variable {profile.token_env!r} is not set.")
@@ -344,8 +362,11 @@ def _dispatch(
                     max_elapsed_seconds=args.max_elapsed_seconds, max_records=args.max_records,
                     timeout=args.timeout),
                 opener=opener, sleeper=sleeper, monotonic=monotonic, seed=saved,
-                progress=lambda value: work.save(value, identity=identity),
+                progress=save_progress,
             )
+        if metadata is not None:
+            annotate_trace(outcome, metadata)
+            return write_trace_outcome(outcome, args, output_stream, error_stream, token=resume_token)
         write_result(outcome.result, args.output, output_stream)
         write_log_report(outcome.report, args.report, error_stream, token=resume_token)
         return outcome.exit_code
