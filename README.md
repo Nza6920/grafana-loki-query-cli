@@ -226,11 +226,27 @@ records remain separate evidence, and actual raw network counts are reported
 separately from retained valid records. Each coverage interval records its
 actual attempt count and requested limit (null for unqueried work).
 
-A saturated response or timeout leaves an explicit gap in this fixed-interval
-scan. Parse losses and exhausted temporary failures preserve valid evidence
-and allow independent intervals to continue. Authentication and invalid-query
-failures stop immediately, retaining earlier evidence and reporting remaining
-work. Reports identify `http_attempt_budget`, `elapsed_time_budget`, and
+A saturated response (raw returned count reaches its request limit) or timeout
+bisects that interval without rewriting the query. Child bounds remain exact,
+contiguous integer nanoseconds, including odd-duration splits; direction also
+controls which child runs first. At or below one second, subdivision stops and
+the unresolved interval reports `minimum_interval` together with
+`possible_truncation` or `timeout`. HTTP 429 uses bounded backoff and does not
+cause subdivision. Parse losses and exhausted temporary failures preserve
+valid evidence and allow independent intervals to continue.
+
+A resolved child replaces only its own portion of the parent sample. Unqueried
+or failed children keep usable inherited records, and incomplete replacements
+keep the single sample with more valid records rather than combining observations. Genuine
+identical records remain separate. Replacement reuses the record capacity
+occupied by that interval, so parent and child network results do not count
+twice against the retained-record budget. Coverage includes `retained_records`
+and `sample_origin`; `requests` records queried parent and child bounds,
+limits, attempts and outcomes, while aggregate raw counts describe actual
+network results and valid counts describe the final retained evidence.
+
+Authentication and invalid-query failures stop immediately, retaining earlier
+evidence and reporting remaining work. Reports identify `http_attempt_budget`, `elapsed_time_budget`, and
 `record_budget` stops. Unresolved scans return 4, authentication returns 3,
 and configuration errors return 2. Scans do not write log archives; only an
 explicit `--report` writes completeness metadata.

@@ -145,7 +145,7 @@ def build_parser(
         default=30.0,
         help="HTTP timeout in seconds (default: 30).",
     )
-    query_parser.add_argument("--scan", action="store_true", help="Scan consecutive intervals with bounded execution.")
+    query_parser.add_argument("--scan", action="store_true", help="Adaptively scan dense or timed-out intervals with bounded execution.")
     query_parser.add_argument("--max-http-attempts", type=_positive_int, help="Scan HTTP attempt budget (default: 60).")
     query_parser.add_argument("--max-elapsed-seconds", type=_positive_float, help="Scan elapsed budget (default: 300).")
     query_parser.add_argument("--max-records", type=_positive_int, help="Scan retained record budget (default: 10000).")
