@@ -580,8 +580,20 @@ across continuous slow output, rather than restarting for each read.
 record's deterministic compact, sorted-key UTF-8 JSON, including its type,
 nanosecond timestamp, labels and line/value. A response exceeding retention is
 rejected atomically, preserving ordering rather than selecting a wire-order
-prefix. This is a data budget, not an exact process RSS limit. Multi-request
-cumulative retention and archive loading are separate delivery boundaries.
+prefix. Scans share one current retained-byte allowance across all intervals,
+including saved baseline samples on resume. Splitting transfers ownership;
+accepted child replacements release the old charge. Retention exhaustion stops
+new requests and preserves earlier evidence; response overflow leaves its interval
+unresolved without extra splitting or retries. Usage reports current retained
+bytes, rather than a historical sum. This is a data budget, not an exact process
+RSS limit. Bounded archive loading is a separate delivery boundary.
+
+Log scans apply the same complete-record and combined stdout/stderr output caps
+as ordinary queries. Display loss returns 4 while resolved retrieval coverage
+stays resolved. Reports and the final checkpoint save separate `evidence` status;
+archives retain all collected records even when terminal output is clipped.
+Historical parse counters remain in retrieval reports; local parse loss describes
+only this execution. Offline export can display the archived evidence again.
 
 Invalid budgets return 2 before HTTP; response/retention overflow and reception
 timeout return 4 with incomplete evidence and unresolved retrieval. Authentication

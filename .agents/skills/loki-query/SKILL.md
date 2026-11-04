@@ -72,6 +72,11 @@ Resolve command syntax and type-specific options from CLI help and the
    `response_bytes`, `retained_bytes` and `response_timeout` as retrieval gaps;
    an oversized response is rejected whole without recovery retries. Resolve
    `--max-response-bytes` and `--max-retained-bytes` defaults/ranges from help.
+   Scan retention includes saved baseline records and all active intervals;
+   child replacement releases its prior charge. On retention exhaustion retain
+   earlier evidence and report unresolved intervals without automatic recovery.
+   Read report/checkpoint `evidence` separately from retrieval `coverage`: display
+   loss returns 4 while resolved coverage and full archived records survive.
    These byte budgets do not bound exact process RSS.
    Keep JSONL records whole for downstream redaction. Business-field redaction
    remains the workspace entrypoint's responsibility; complete CLI records do
