@@ -594,7 +594,22 @@ accepted child replacements release the old charge. Retention exhaustion stops
 new requests and preserves earlier evidence; response overflow leaves its interval
 unresolved without extra splitting or retries. Usage reports current retained
 bytes, rather than a historical sum. This is a data budget, not an exact process
-RSS limit. Bounded archive loading is a separate delivery boundary.
+RSS limit.
+
+Export and resume read actual archive bytes in bounded chunks before JSON
+parsing, using the effective `--max-retained-bytes` cap. The checksum envelope,
+metadata and whitespace count too; exactly the cap is accepted. Decoded records
+then separately share that same canonical retention cap. Oversized archives
+return 4 with `archive_bytes` or `retained_bytes`; invalid/corrupt state still
+returns 2. Refusal preserves the original archive and performs no HTTP.
+
+Ordinary and trace exports support human, raw and JSONL with the same per-record
+and combined output limits. Each export/resume starts fresh local display loss
+and parse counters while preserving historical retrieval totals and coverage.
+Export needs no credentials or configuration and leaves the archive unchanged.
+Resolved resume needs no token and performs no HTTP, even after earlier display
+loss. Resume shares retention across loaded baseline and new evidence, and saves
+full evidence independently of terminal limits.
 
 Log scans apply the same complete-record and combined stdout/stderr output caps
 as ordinary queries. Display loss returns 4 while resolved retrieval coverage

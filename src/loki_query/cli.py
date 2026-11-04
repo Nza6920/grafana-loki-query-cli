@@ -207,7 +207,12 @@ def build_parser(
                               help="Complete rendered record bytes (1-8388608; default: 4194304 / 4 MiB).")
     trace_parser.add_argument("--max-output-bytes", type=_output_bytes, default=DEFAULT_OUTPUT_BYTES,
                               help="Combined stdout/stderr bytes (1-33554432; default: 1048576 / 1 MiB).")
-    for data_parser in (query_parser, trace_parser, resume_parser):
+    for archive_parser in (export_parser, resume_parser):
+        archive_parser.add_argument("--max-record-bytes", type=_record_bytes, default=DEFAULT_RECORD_BYTES,
+                                    help="Complete rendered record bytes (1-8388608; default: 4194304 / 4 MiB).")
+        archive_parser.add_argument("--max-output-bytes", type=_output_bytes, default=DEFAULT_OUTPUT_BYTES,
+                                    help="Combined stdout/stderr bytes (1-33554432; default: 1048576 / 1 MiB).")
+    for data_parser in (query_parser, trace_parser, resume_parser, export_parser):
         data_parser.add_argument("--max-response-bytes", type=lambda value: _byte_budget(value, MAX_RESPONSE_BYTES),
                                  default=DEFAULT_RESPONSE_BYTES, help="Actual HTTP body bytes (1-67108864; default: 33554432 / 32 MiB).")
         data_parser.add_argument("--max-retained-bytes", type=lambda value: _byte_budget(value, MAX_RETAINED_BYTES),
@@ -300,7 +305,7 @@ def main(
         return outcome.status
     budget = (OutputBudget(args.max_record_bytes, args.max_output_bytes,
                            max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes)
-              if args.command in ("query", "trace") else None)
+              if args.command in ("query", "trace", "export", "resume") else None)
     if budget is not None:
         budget.ensure_status_capacity()
     original_error_stream = error_stream
@@ -388,7 +393,11 @@ def _dispatch(
         validate_report_destination(args.report)
         work = WorkDirectory(args.work_dir)
         work.validate_report(args.report)
-        _, saved = work.load()
+        _, saved = work.load(args.max_retained_bytes)
+        saved.report['current_losses'] = {}
+        saved.report['usage']['current'] = {**saved.report['usage']['current'],
+                                            'skipped_entries': 0, 'skipped_series': 0}
+        saved.report.pop('evidence', None)
         if 'trace' in saved.report:
             if not args.service_field.strip():
                 raise ConfigurationError('Service field must not be empty.')
@@ -400,7 +409,7 @@ def _dispatch(
         validate_report_destination(args.report)
         with WorkDirectory(args.work_dir).writer() as work:
             work.validate_report(args.report)
-            identity, saved = work.load()
+            identity, saved = work.load(args.max_retained_bytes)
             config = load_config(selected_config_path)
             profile = config.profiles.get(args.profile)
             if profile is None:
@@ -430,12 +439,15 @@ def _dispatch(
                 opener=opener, sleeper=sleeper, monotonic=monotonic, seed=saved,
                 progress=save_progress,
             )
-        if metadata is not None:
-            annotate_trace(outcome, metadata)
-            return write_trace_outcome(outcome, args, output_stream, error_stream, token=resume_token)
-        write_result(outcome.result, args.output, output_stream)
-        write_log_report(outcome.report, args.report, error_stream, token=resume_token)
-        return outcome.exit_code
+            if metadata is not None:
+                annotate_trace(outcome, metadata)
+                code = write_trace_outcome(outcome, args, output_stream, error_stream, token=resume_token)
+            else:
+                write_result(outcome.result, args.output, output_stream)
+                write_log_report(outcome.report, args.report, error_stream, token=resume_token)
+                code = outcome.exit_code
+            work.save(outcome, identity=identity)
+            return code
     if args.command == "config" and args.config_command == "path":
         print(selected_config_path, file=output_stream)
     elif args.command == "config" and args.config_command == "validate":
