@@ -9,7 +9,7 @@ import re
 from typing import Any, TextIO
 from urllib.request import Request
 
-from .client import AuthenticationError, HttpAttemptBudgetError, LogEntry, Opener, QueryError, QueryResourceError, QueryTimeoutError, QueryResult, ReadableResponse, Sleeper, query_range
+from .client import AuthenticationError, LogEntry, Opener, QueryError, QueryResult, ReadableResponse, Sleeper, query_range, query_error_reason
 from .config import ConfigurationError, load_config
 from .output import BudgetedStream, format_timestamp_utc, set_retrieval_status, write_record, write_result
 from .persistence import WorkDirectory
@@ -353,7 +353,7 @@ def run_trace(
                              opener=counted_opener, sleeper=sleeper, monotonic=monotonic,
                              max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes)
     except QueryError as error:
-        report = report_for(None, None, 'authentication_failed' if isinstance(error, AuthenticationError) else 'http_attempt_budget' if isinstance(error, HttpAttemptBudgetError) else str(error).split(':', 1)[0] if isinstance(error, (QueryResourceError, QueryTimeoutError)) else 'request_failed')
+        report = report_for(None, None, query_error_reason(error))
         write_log_report(report, args.report, stderr, token=token)
         raise
     matches = (matched_labels(result, args.trace_id, label_fields) if args.source == 'label'

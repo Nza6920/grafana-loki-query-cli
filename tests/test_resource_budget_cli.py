@@ -80,6 +80,38 @@ class ResourceBudgetCliTests(unittest.TestCase):
                 else:
                     self.assertIn('中', stdout)
 
+    def test_escaped_unpaired_surrogates_are_parse_loss_preserving_valid_rows(self) -> None:
+        for metric in (False, True):
+            for field in ('payload', 'label_key', 'label_value'):
+                with self.subTest(metric=metric, field=field):
+                    labels = {'app': 'api'}
+                    if field == 'label_key':
+                        labels = {'\ud800': 'api'}
+                    elif field == 'label_value':
+                        labels = {'app': '\udfff'}
+                    label_field = 'metric' if metric else 'stream'
+                    good = {label_field: {'app': 'api'}, 'values': [[1 if metric else '1', 'valid']]}
+                    bad = {label_field: labels, 'values': [[2 if metric else '2',
+                                                          '\ud800' if field == 'payload' else 'lost']]}
+                    body = json.dumps({'status': 'success', 'data': {
+                        'resultType': 'matrix' if metric else 'streams', 'result': [good, bad],
+                    }}).encode('ascii')
+                    code, stdout, stderr, closed, attempts = self.run_query(body, metric=metric)
+                    self.assertEqual(code, 4, stderr)
+                    rows = [json.loads(line) for line in stdout.splitlines()]
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0]['value' if metric else 'line'], 'valid')
+                    self.assertEqual(rows[0]['labels'], {'app': 'api'})
+                    self.assertIn('parse_loss', stderr)
+                    self.assertIn('skipped 0 series' if field == 'payload' else 'skipped 1 series', stderr)
+                    if metric:
+                        self.assertIn('1 metric samples' if field == 'payload' else '0 metric samples', stderr)
+                    else:
+                        self.assertIn('1 log entries', stderr)
+                    self.assertNotIn('surrogate', stderr)
+                    self.assertTrue(closed)
+                    self.assertEqual(attempts, 1)
+
     def test_request_deadline_includes_opening_and_every_body_read(self) -> None:
         current = 0.0
         def clock() -> float:
@@ -166,6 +198,19 @@ class ResourceBudgetCliTests(unittest.TestCase):
             self.assertEqual(stdout, '')
             self.assertTrue(closed)
             self.assertEqual(attempts, 1)
+
+    def test_json_decoder_limits_return_safe_failure_and_close_response(self) -> None:
+        prefix = b'{"status":"success","data":{"resultType":"streams","result":'
+        for value in (b'[' * 10000 + b'0' + b']' * 10000, b'9' * 10000):
+            with self.subTest(kind='nested' if value.startswith(b'[') else 'integer'):
+                code, stdout, stderr, closed, attempts = self.run_query(prefix + value + b'}}')
+                self.assertEqual(code, 4, stderr)
+                self.assertEqual(stdout, '')
+                self.assertIn('invalid JSON response', stderr)
+                self.assertIn('"local_evidence":"incomplete"', stderr)
+                self.assertNotIn('Traceback', stderr)
+                self.assertTrue(closed)
+                self.assertEqual(attempts, 1)
 
     def test_trace_and_scan_share_response_protection_without_resource_recovery(self) -> None:
         for trace, flags in ((True, []), (False, ['--scan', '--since', '1m'])):

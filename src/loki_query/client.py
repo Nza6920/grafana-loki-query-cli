@@ -58,6 +58,17 @@ class AuthenticationError(QueryError):
     """Raised when Grafana rejects the configured bearer token."""
 
 
+def query_error_reason(error: QueryError, *, fallback: str = "request_failed") -> str:
+    """Stable report classification shared by query, trace, and scan callers."""
+    if isinstance(error, AuthenticationError):
+        return "authentication_failed"
+    if isinstance(error, HttpAttemptBudgetError):
+        return "http_attempt_budget"
+    if isinstance(error, (QueryResourceError, QueryTimeoutError)):
+        return str(error).split(":", 1)[0]
+    return fallback
+
+
 @dataclass(frozen=True)
 class LogEntry:
     timestamp_ns: int
@@ -296,7 +307,7 @@ def _retry_delay(retry_after: str | None, attempt: int) -> float:
 def _decode_payload(body: bytes | bytearray) -> dict[str, Any]:
     try:
         payload = json.loads(body, parse_float=Decimal)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (ValueError, RecursionError) as error:
         raise QueryError("Grafana returned an invalid JSON response.") from error
     if not isinstance(payload, dict):
         raise QueryError("Grafana returned an unexpected JSON response.")
@@ -349,7 +360,7 @@ def _result_from_payload(
                     skipped_samples += 1
                     continue
                 timestamp, value = sample
-                if not isinstance(value, str):
+                if not isinstance(value, str) or not _is_utf8(value):
                     skipped_samples += 1
                     continue
                 try:
@@ -400,7 +411,7 @@ def _result_from_payload(
                 skipped_entries += 1
                 continue
             timestamp, line = entry
-            if not isinstance(line, str):
+            if not isinstance(line, str) or not _is_utf8(line):
                 skipped_entries += 1
                 continue
             try:
@@ -457,7 +468,16 @@ def _labels(value: object) -> dict[str, str] | None:
         return None
     if not all(
         isinstance(key, str) and isinstance(item, str)
+        and _is_utf8(key) and _is_utf8(item)
         for key, item in value.items()
     ):
         return None
     return dict(value)
+
+
+def _is_utf8(value: str) -> bool:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True

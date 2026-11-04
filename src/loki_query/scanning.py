@@ -8,7 +8,7 @@ from urllib.request import Request
 
 from .client import (
     AuthenticationError, InvalidQueryError, Opener, ParseSummary, QueryError,
-    RetainedBudget, canonical_record_size, QueryResult, QueryTimeoutError, QueryResourceError, DEFAULT_RESPONSE_BYTES, DEFAULT_RETAINED_BYTES, ReadableResponse, Record, Sleeper, query_range,
+    RetainedBudget, canonical_record_size, QueryResult, QueryTimeoutError, QueryResourceError, DEFAULT_RESPONSE_BYTES, DEFAULT_RETAINED_BYTES, ReadableResponse, Record, Sleeper, query_range, query_error_reason,
 )
 from .config import Profile
 from .reporting import log_report
@@ -204,6 +204,8 @@ def scan_range(
                                  max_retained_bytes=byte_capacity)
         except BudgetStopped as error:
             stop_reasons = [str(error)]
+            if stop_reasons == ["retained_bytes"]:
+                current_losses["retained_bytes"] = current_losses.get("retained_bytes", 0) + 1
             if interval.http_attempts:
                 interval.reasons = list(stop_reasons)
             break
@@ -214,9 +216,9 @@ def scan_range(
             fatal_code = 3 if isinstance(error, AuthenticationError) else 4
             break
         except QueryResourceError as error:
-            reason = str(error).split(":", 1)[0]
+            reason = query_error_reason(error)
             current_losses[reason] = current_losses.get(reason, 0) + 1
-            interval.reasons = [str(error).split(":", 1)[0]]
+            interval.reasons = [reason]
             if interval.reasons == ["retained_bytes"]:
                 stop_reasons = list(interval.reasons)
                 break

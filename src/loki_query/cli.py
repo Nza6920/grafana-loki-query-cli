@@ -22,7 +22,7 @@ from .client import (
     Sleeper,
     default_opener,
     query_range,
-    query_endpoint,
+    query_endpoint, query_error_reason,
 )
 from .config import ConfigurationError, default_config_path, load_config
 from .persistence import WorkDirectory
@@ -353,7 +353,7 @@ def main(
         resource_loss = isinstance(error, (QueryResourceError, QueryTimeoutError))
         set_retrieval_status(error_stream, "incomplete" if resource_loss else "failed")
         if budget is not None:
-            reason = str(error).split(":", 1)[0] if resource_loss else "query_failed"
+            reason = query_error_reason(error, fallback="query_failed")
             if reason not in budget.losses:
                 budget.mark_loss(reason)
         print(f"error: {error}", file=error_stream)
@@ -589,10 +589,7 @@ def _dispatch(
                     direction=args.direction or "backward", limit=args.limit or 100,
                     result=None, attempts=attempts, timeout=args.timeout,
                     elapsed_seconds=max(0.0, monotonic() - started),
-                    failure_reason=("authentication_failed" if isinstance(error, AuthenticationError)
-                                    else "http_attempt_budget" if isinstance(error, HttpAttemptBudgetError)
-                                    else str(error).split(":", 1)[0] if isinstance(error, (QueryResourceError, QueryTimeoutError))
-                                    else "request_failed"),
+                    failure_reason=query_error_reason(error),
                     max_http_attempts=min(3, args.max_http_attempts or 3),
                     max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes,
                 )
