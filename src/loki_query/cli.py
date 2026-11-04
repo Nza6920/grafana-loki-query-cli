@@ -16,7 +16,8 @@ from .client import (
     AuthenticationError,
     HttpAttemptBudgetError,
     Opener,
-    QueryError,
+    QueryError, QueryResourceError, QueryTimeoutError,
+    DEFAULT_RESPONSE_BYTES, MAX_RESPONSE_BYTES, DEFAULT_RETAINED_BYTES, MAX_RETAINED_BYTES,
     ReadableResponse,
     Sleeper,
     default_opener,
@@ -161,8 +162,9 @@ def build_parser(
     query_parser.add_argument("--work-dir", help="Persist scan progress and evidence in this explicit directory.")
     query_parser.add_argument("--report", help="Write log completeness JSON to this file.")
     query_parser.add_argument("logql", help="Complete LogQL query, or - to read stdin.")
+    trace_parser = subparsers.add_parser("trace", help="Query exact trace IDs and show a timeline.")
     configure_trace_parser(
-        subparsers.add_parser("trace", help="Query exact trace IDs and show a timeline."),
+        trace_parser,
         limit_type=_limit, timeout_type=_positive_float, budget_type=_positive_int,
     )
     export_parser = subparsers.add_parser("export", help="Export a saved scan without configuration, credentials, or HTTP.")
@@ -201,6 +203,11 @@ def build_parser(
     )
     config_subparsers.add_parser("path", help="Print the default configuration path.")
     config_subparsers.add_parser("validate", help="Validate the configuration file.")
+    for data_parser in (query_parser, trace_parser, resume_parser):
+        data_parser.add_argument("--max-response-bytes", type=lambda value: _byte_budget(value, MAX_RESPONSE_BYTES),
+                                 default=DEFAULT_RESPONSE_BYTES, help="Actual HTTP body bytes (1-67108864; default: 33554432 / 32 MiB).")
+        data_parser.add_argument("--max-retained-bytes", type=lambda value: _byte_budget(value, MAX_RETAINED_BYTES),
+                                 default=DEFAULT_RETAINED_BYTES, help="Retained canonical UTF-8 bytes (1-268435456; default: 67108864 / 64 MiB).")
     return parser
 
 
@@ -231,6 +238,13 @@ def _positive_float(value: str) -> float:
         raise argparse.ArgumentTypeError("timeout must be a number") from error
     if not math.isfinite(parsed) or parsed <= 0:
         raise argparse.ArgumentTypeError("value must be finite and positive")
+    return parsed
+
+
+def _byte_budget(value: str, maximum: int) -> int:
+    parsed = _positive_int(value)
+    if parsed > maximum:
+        raise argparse.ArgumentTypeError(f"byte budget must be between 1 and {maximum}")
     return parsed
 
 
@@ -280,7 +294,8 @@ def main(
         args = parser.parse_args(argv)
     except _ParserExit as outcome:
         return outcome.status
-    budget = (OutputBudget(args.max_record_bytes, args.max_output_bytes)
+    budget = (OutputBudget(args.max_record_bytes, args.max_output_bytes,
+                           max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes)
               if args.command == "query" and not args.scan else None)
     if budget is not None:
         budget.ensure_status_capacity()
@@ -326,9 +341,12 @@ def main(
         print(f"error: {error}", file=error_stream)
         return EXIT_AUTH
     except QueryError as error:
-        set_retrieval_status(error_stream, "failed")
+        resource_loss = isinstance(error, (QueryResourceError, QueryTimeoutError))
+        set_retrieval_status(error_stream, "incomplete" if resource_loss else "failed")
         if budget is not None:
-            budget.mark_loss("query_failed")
+            reason = str(error).split(":", 1)[0] if resource_loss else "query_failed"
+            if reason not in budget.losses:
+                budget.mark_loss(reason)
         print(f"error: {error}", file=error_stream)
         return EXIT_QUERY
     except BaseException:
@@ -403,7 +421,8 @@ def _dispatch(
                 direction=identity['direction'],
                 options=ScanOptions(limit=args.limit, max_http_attempts=args.max_http_attempts or 60,
                     max_elapsed_seconds=args.max_elapsed_seconds, max_records=args.max_records,
-                    timeout=args.timeout),
+                    timeout=args.timeout, max_response_bytes=args.max_response_bytes,
+                    max_retained_bytes=args.max_retained_bytes),
                 opener=opener, sleeper=sleeper, monotonic=monotonic, seed=saved,
                 progress=save_progress,
             )
@@ -492,7 +511,8 @@ def _dispatch(
                     options=ScanOptions(limit=args.limit or 1000,
                         max_http_attempts=args.max_http_attempts or 60,
                         max_elapsed_seconds=args.max_elapsed_seconds or 300.0,
-                        max_records=args.max_records or 10000, timeout=args.timeout),
+                        max_records=args.max_records or 10000, timeout=args.timeout, max_response_bytes=args.max_response_bytes,
+                    max_retained_bytes=args.max_retained_bytes),
                     opener=opener, sleeper=sleeper, monotonic=monotonic, progress=progress,
                 )
             if args.work_dir is not None:
@@ -530,7 +550,8 @@ def _dispatch(
                 step=args.step,
                 timeout=args.timeout,
                 opener=counted_opener,
-                sleeper=sleeper,
+                sleeper=sleeper, monotonic=monotonic,
+                max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes,
             )
         except QueryError as error:
             if args.query_type == "log":
@@ -541,8 +562,10 @@ def _dispatch(
                     elapsed_seconds=max(0.0, monotonic() - started),
                     failure_reason=("authentication_failed" if isinstance(error, AuthenticationError)
                                     else "http_attempt_budget" if isinstance(error, HttpAttemptBudgetError)
+                                    else str(error).split(":", 1)[0] if isinstance(error, (QueryResourceError, QueryTimeoutError))
                                     else "request_failed"),
                     max_http_attempts=min(3, args.max_http_attempts or 3),
+                    max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes,
                 )
                 write_log_report(report, args.report, error_stream, token=token)
             raise
@@ -555,6 +578,7 @@ def _dispatch(
                 direction=args.direction or "backward", limit=args.limit or 100,
                 result=result, attempts=attempts, timeout=args.timeout, elapsed_seconds=max(0.0, monotonic() - started),
                 max_http_attempts=min(3, args.max_http_attempts or 3),
+                    max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes,
             )
             write_log_report(report, args.report, error_stream, token=token)
         if result.skipped.incomplete:

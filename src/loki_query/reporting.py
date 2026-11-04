@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, TextIO
 
-from .client import QueryResult, query_endpoint
+from .client import QueryResult, query_endpoint, DEFAULT_RESPONSE_BYTES, DEFAULT_RETAINED_BYTES
 from .config import ConfigurationError, Profile
 from .output import BudgetedStream, set_retrieval_status
 
@@ -14,6 +14,8 @@ def log_report(
     direction: str, limit: int, result: QueryResult | None, attempts: int,
     elapsed_seconds: float, timeout: float, failure_reason: str | None = None,
     max_http_attempts: int = 3,
+    max_response_bytes: int = DEFAULT_RESPONSE_BYTES,
+    max_retained_bytes: int = DEFAULT_RETAINED_BYTES,
 ) -> dict[str, Any]:
     interval = {"start_ns": str(start_ns), "end_ns": str(end_ns)}
     usage = {"http_attempts": attempts, "elapsed_seconds": elapsed_seconds}
@@ -31,7 +33,7 @@ def log_report(
         "query": query,
         "start_ns": str(start_ns), "end_ns": str(end_ns),
         "direction": direction,
-        "status": "failed" if failure_reason else "incomplete" if reasons else "complete",
+        "status": "incomplete" if failure_reason in {"response_bytes", "retained_bytes", "response_timeout"} else "failed" if failure_reason else "incomplete" if reasons else "complete",
         "completeness_scope": "Retrieval under the declared query and range only; does not prove ingestion completeness or absence of business events.",
         "coverage": {"resolved": [] if reasons else [interval],
                      "unresolved": [{**interval, "reasons": reasons}] if reasons else []},
@@ -41,7 +43,8 @@ def log_report(
         "request_limit": limit,
         "usage": {"current": usage, "cumulative": dict(usage)},
         "budgets": {"max_http_attempts": max_http_attempts, "max_elapsed_seconds": None, "max_records": None,
-                    "request_timeout_seconds": timeout},
+                    "request_timeout_seconds": timeout, "max_response_bytes": max_response_bytes,
+                    "max_retained_bytes": max_retained_bytes},
         "stop_reasons": [failure_reason] if failure_reason else [],
     }
 
@@ -77,9 +80,15 @@ def write_log_report(
         stderr.budget.mark_loss("request_failed")
     counts, usage = report["counts"], report["usage"]["current"]
     reasons = [reason for interval in report["coverage"]["unresolved"] for reason in interval["reasons"]]
+    resource_reasons = sorted(set(reasons) & {"response_bytes", "retained_bytes", "response_timeout"})
+    if resource_reasons and isinstance(stderr, BudgetedStream):
+        for reason in resource_reasons:
+            stderr.budget.mark_loss(reason)
     warning = ""
     if reasons:
         warning = "warning: incomplete results; "
+        if resource_reasons:
+            warning += "resource loss: " + ", ".join(resource_reasons) + "; "
         if "possible_truncation" in reasons:
             warning += "possible truncation (returned limit); "
         if "parse_loss" in reasons:

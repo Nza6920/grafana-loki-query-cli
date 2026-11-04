@@ -61,12 +61,18 @@ Resolve command syntax and type-specific options from CLI help and the
    the invocation is settled and its evidence, coverage, and error are recorded.
 4. Check local evidence before drawing conclusions. Read stderr's `evidence:`
    JSON status alongside retrieval coverage. `local_evidence=incomplete` means
-   output/parse loss even when retrieval resolved; preserve loss reasons,
+   output/parse/resource loss even when retrieval resolved; preserve loss reasons,
    oversized-record counts and unknown unprocessed tails. The CLI bounds each
    complete record and combined stdout/stderr by UTF-8 bytes; obtain defaults
    and finite ranges from command help. A larger finite allowance requires an
    explicit investigation decision; exhaustion calls for a narrower-query
    decision within the same authorization and ledger, never automatic requery.
+   HTTP bodies are bounded before JSON decoding, and ordinary log/metric
+   retention charges complete canonical UTF-8 records including labels. Treat
+   `response_bytes`, `retained_bytes` and `response_timeout` as retrieval gaps;
+   an oversized response is rejected whole without recovery retries. Resolve
+   `--max-response-bytes` and `--max-retained-bytes` defaults/ranges from help.
+   These byte budgets do not bound exact process RSS.
    Keep JSONL records whole for downstream redaction. Business-field redaction
    remains the workspace entrypoint's responsibility; complete CLI records do
    not establish that free text is safe to expose.

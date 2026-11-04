@@ -61,7 +61,8 @@ class ScanCliTests(unittest.TestCase):
         report = self.read_report()
         self.assertEqual(report['status'], 'complete')
         self.assertEqual(report['budgets'], {'max_http_attempts': 60, 'max_elapsed_seconds': 300.0,
-                                           'max_records': 10000, 'request_timeout_seconds': 30.0})
+                                           'max_records': 10000, 'request_timeout_seconds': 30.0,
+                                           'max_response_bytes': 33554432, 'max_retained_bytes': 67108864})
         self.assertEqual(len(report['coverage']['resolved']), 3)
 
     def test_forward_scan_preserves_duplicate_records_and_global_descending_output(self) -> None:

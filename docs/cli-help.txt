@@ -32,6 +32,8 @@ usage: loki-query query [-h] --profile PROFILE [--query-type {log,metric}]
                         [--max-elapsed-seconds MAX_ELAPSED_SECONDS]
                         [--max-records MAX_RECORDS] [--work-dir WORK_DIR]
                         [--report REPORT]
+                        [--max-response-bytes MAX_RESPONSE_BYTES]
+                        [--max-retained-bytes MAX_RETAINED_BYTES]
                         logql
 
 positional arguments:
@@ -71,6 +73,12 @@ options:
   --work-dir WORK_DIR   Persist scan progress and evidence in this explicit
                         directory.
   --report REPORT       Write log completeness JSON to this file.
+  --max-response-bytes MAX_RESPONSE_BYTES
+                        Actual HTTP body bytes (1-67108864; default: 33554432
+                        / 32 MiB).
+  --max-retained-bytes MAX_RETAINED_BYTES
+                        Retained canonical UTF-8 bytes (1-268435456; default:
+                        67108864 / 64 MiB).
 
 $ loki-query export --help
 usage: loki-query export [-h] --work-dir WORK_DIR [--output {human,raw,jsonl}]
@@ -94,6 +102,8 @@ usage: loki-query resume [-h] --work-dir WORK_DIR --profile PROFILE
                          [--service-field SERVICE_FIELD] [--trace-id TRACE_ID]
                          [--source {json,label}] [--selector SELECTOR]
                          [--field FIELDS] [--path PATHS] [--report REPORT]
+                         [--max-response-bytes MAX_RESPONSE_BYTES]
+                         [--max-retained-bytes MAX_RETAINED_BYTES]
 
 options:
   -h, --help            show this help message and exit
@@ -116,6 +126,12 @@ options:
   --field FIELDS        Assert the saved trace field mapping.
   --path PATHS          Assert the saved trace JSON Pointer mapping.
   --report REPORT       Write current and cumulative completeness JSON.
+  --max-response-bytes MAX_RESPONSE_BYTES
+                        Actual HTTP body bytes (1-67108864; default: 33554432
+                        / 32 MiB).
+  --max-retained-bytes MAX_RETAINED_BYTES
+                        Retained canonical UTF-8 bytes (1-268435456; default:
+                        67108864 / 64 MiB).
 
 $ loki-query trace --help
 usage: loki-query trace [-h] --profile PROFILE --selector SELECTOR
@@ -129,6 +145,8 @@ usage: loki-query trace [-h] --profile PROFILE --selector SELECTOR
                         [--max-elapsed-seconds MAX_ELAPSED_SECONDS]
                         [--max-records MAX_RECORDS] [--work-dir WORK_DIR]
                         [--report REPORT]
+                        [--max-response-bytes MAX_RESPONSE_BYTES]
+                        [--max-retained-bytes MAX_RETAINED_BYTES]
                         trace_id
 
 positional arguments:
@@ -166,6 +184,12 @@ options:
   --work-dir WORK_DIR   Persist trace scan candidates and progress in this
                         directory.
   --report REPORT       Write trace completeness JSON to this file.
+  --max-response-bytes MAX_RESPONSE_BYTES
+                        Actual HTTP body bytes (1-67108864; default: 33554432
+                        / 32 MiB).
+  --max-retained-bytes MAX_RETAINED_BYTES
+                        Retained canonical UTF-8 bytes (1-268435456; default:
+                        67108864 / 64 MiB).
 
 $ loki-query config --help
 usage: loki-query config [-h] {path,validate} ...

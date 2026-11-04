@@ -9,7 +9,7 @@ import re
 from typing import Any, TextIO
 from urllib.request import Request
 
-from .client import AuthenticationError, HttpAttemptBudgetError, LogEntry, Opener, QueryError, QueryResult, ReadableResponse, Sleeper, query_range
+from .client import AuthenticationError, HttpAttemptBudgetError, LogEntry, Opener, QueryError, QueryResourceError, QueryTimeoutError, QueryResult, ReadableResponse, Sleeper, query_range
 from .config import ConfigurationError, load_config
 from .output import format_timestamp_utc, write_result
 from .persistence import WorkDirectory
@@ -307,7 +307,8 @@ def run_trace(
                 direction=args.direction, options=ScanOptions(limit=args.limit,
                     max_http_attempts=args.max_http_attempts or 60,
                     max_elapsed_seconds=args.max_elapsed_seconds or 300.0,
-                    max_records=args.max_records or 10000, timeout=args.timeout),
+                    max_records=args.max_records or 10000, timeout=args.timeout,
+                    max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes),
                 opener=opener, sleeper=sleeper, monotonic=monotonic, progress=progress)
             return annotate_trace(outcome, metadata)
         if args.work_dir is not None:
@@ -329,7 +330,8 @@ def run_trace(
         report = log_report(profile=profile, query=query, start_ns=start_ns, end_ns=end_ns,
                             direction=args.direction, limit=args.limit, result=result, attempts=attempts,
                             elapsed_seconds=max(0.0, monotonic() - started), timeout=args.timeout,
-                            failure_reason=reason, max_http_attempts=min(3, args.max_http_attempts or 3))
+                            failure_reason=reason, max_http_attempts=min(3, args.max_http_attempts or 3),
+                            max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes)
         report['trace'] = metadata
         report['counts']['matched_records'] = len(matches.records) if matches else 0
         report['counts']['filtered_candidates'] = len(result.records) - len(matches.records) if result and matches else 0
@@ -338,9 +340,10 @@ def run_trace(
     try:
         result = query_range(profile=profile, token=token, query=query, start_ns=start_ns,
                              end_ns=end_ns, limit=args.limit, direction=args.direction, timeout=args.timeout,
-                             opener=counted_opener, sleeper=sleeper)
+                             opener=counted_opener, sleeper=sleeper, monotonic=monotonic,
+                             max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes)
     except QueryError as error:
-        report = report_for(None, None, 'authentication_failed' if isinstance(error, AuthenticationError) else 'http_attempt_budget' if isinstance(error, HttpAttemptBudgetError) else 'request_failed')
+        report = report_for(None, None, 'authentication_failed' if isinstance(error, AuthenticationError) else 'http_attempt_budget' if isinstance(error, HttpAttemptBudgetError) else str(error).split(':', 1)[0] if isinstance(error, (QueryResourceError, QueryTimeoutError)) else 'request_failed')
         write_log_report(report, args.report, stderr, token=token)
         raise
     matches = (matched_labels(result, args.trace_id, label_fields) if args.source == 'label'
