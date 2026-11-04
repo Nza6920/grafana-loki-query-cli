@@ -25,7 +25,8 @@ from .client import (
 )
 from .config import ConfigurationError, default_config_path, load_config
 from .persistence import WorkDirectory
-from .output import write_result
+from .output import (write_result, BudgetedStream, OutputBudget, set_retrieval_status,
+                     DEFAULT_RECORD_BYTES, MAX_RECORD_BYTES, DEFAULT_OUTPUT_BYTES, MAX_OUTPUT_BYTES)
 from .reporting import log_report, validate_report_destination, write_log_report
 from .scanning import ScanOptions, ScanOutcome, scan_range
 from .time_range import TimeRangeError, resolve_time_range
@@ -149,6 +150,10 @@ def build_parser(
         default=30.0,
         help="HTTP timeout in seconds (default: 30).",
     )
+    query_parser.add_argument("--max-record-bytes", type=_record_bytes, default=DEFAULT_RECORD_BYTES,
+                               help="Complete UTF-8 record bytes (1-8388608; default: 4194304 / 4 MiB).")
+    query_parser.add_argument("--max-output-bytes", type=_output_bytes, default=DEFAULT_OUTPUT_BYTES,
+                               help="Combined stdout/stderr bytes (1-33554432; default: 1048576 / 1 MiB).")
     query_parser.add_argument("--scan", action="store_true", help="Adaptively scan dense or timed-out intervals with bounded execution.")
     query_parser.add_argument("--max-http-attempts", type=_positive_int, help="HTTP attempt ceiling including retries (scan default: 60); explicit cap emits stderr accounting.")
     query_parser.add_argument("--max-elapsed-seconds", type=_positive_float, help="Scan elapsed budget (default: 300).")
@@ -229,6 +234,20 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
+def _record_bytes(value: str) -> int:
+    parsed = _positive_int(value)
+    if parsed > MAX_RECORD_BYTES:
+        raise argparse.ArgumentTypeError("record byte budget must be between 1 and 8388608")
+    return parsed
+
+
+def _output_bytes(value: str) -> int:
+    parsed = _positive_int(value)
+    if parsed > MAX_OUTPUT_BYTES:
+        raise argparse.ArgumentTypeError("output byte budget must be between 1 and 33554432")
+    return parsed
+
+
 def _non_empty_step(value: str) -> str:
     if not value.strip():
         raise argparse.ArgumentTypeError("step must not be empty")
@@ -261,6 +280,14 @@ def main(
         args = parser.parse_args(argv)
     except _ParserExit as outcome:
         return outcome.status
+    budget = (OutputBudget(args.max_record_bytes, args.max_output_bytes)
+              if args.command == "query" and not args.scan else None)
+    if budget is not None:
+        budget.ensure_status_capacity()
+    original_error_stream = error_stream
+    if budget is not None:
+        output_stream = BudgetedStream(output_stream, budget)
+        error_stream = BudgetedStream(error_stream, budget)
     attempts = 0
     cap = getattr(args, "max_http_attempts", None)
 
@@ -277,7 +304,7 @@ def main(
         sleeper(seconds)
 
     try:
-        return _dispatch(
+        exit_code = _dispatch(
             args,
             environment=environment,
             input_stream=input_stream,
@@ -288,18 +315,34 @@ def main(
             now=now or datetime.now(UTC),
             monotonic=monotonic,
         )
+        return EXIT_QUERY if budget is not None and budget.losses and exit_code == 0 else exit_code
     except (ConfigurationError, TimeRangeError) as error:
         print(f"error: {error}", file=error_stream)
         return EXIT_CONFIG
     except AuthenticationError as error:
+        set_retrieval_status(error_stream, "failed")
+        if budget is not None:
+            budget.mark_loss("authentication_failed")
         print(f"error: {error}", file=error_stream)
         return EXIT_AUTH
     except QueryError as error:
+        set_retrieval_status(error_stream, "failed")
+        if budget is not None:
+            budget.mark_loss("query_failed")
         print(f"error: {error}", file=error_stream)
         return EXIT_QUERY
+    except BaseException:
+        set_retrieval_status(error_stream, "failed")
+        if budget is not None:
+            budget.mark_loss("execution_interrupted")
+        raise
     finally:
-        if cap is not None:
-            print(f"HTTP attempt accounting: used={attempts} cap={cap}", file=error_stream)
+        accounting = f"HTTP attempt accounting: used={attempts} cap={cap}\n" if cap is not None else ""
+        if budget is not None:
+            budget.finish(original_error_stream, accounting,
+                          leading_newline=isinstance(error_stream, BudgetedStream) and error_stream.needs_newline)
+        elif accounting:
+            error_stream.write(accounting)
 
 
 def _dispatch(
@@ -428,6 +471,9 @@ def _dispatch(
                 f"error: token environment variable {profile.token_env!r} is not set.",
                 file=error_stream,
             )
+            set_retrieval_status(error_stream, "failed")
+            if isinstance(error_stream, BudgetedStream):
+                error_stream.budget.mark_loss("authentication_failed")
             return EXIT_AUTH
         query = input_stream.read() if args.logql == "-" else args.logql
         if not query.strip():
@@ -500,6 +546,8 @@ def _dispatch(
                 )
                 write_log_report(report, args.report, error_stream, token=token)
             raise
+        set_retrieval_status(error_stream, "incomplete" if result.skipped.incomplete else "complete",
+                             parse_loss=result.skipped.incomplete)
         write_result(result, args.output, output_stream)
         if args.query_type == "log":
             report = log_report(

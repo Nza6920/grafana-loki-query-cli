@@ -59,7 +59,18 @@ Resolve command syntax and type-specific options from CLI help and the
    completeness reports only when they belong to the current query; deduct
    current invocation usage, never a resume's cumulative totals. Complete when
    the invocation is settled and its evidence, coverage, and error are recorded.
-4. Follow evidence within the settled ledger. Empty successful, resolved
+4. Check local evidence before drawing conclusions. Read stderr's `evidence:`
+   JSON status alongside retrieval coverage. `local_evidence=incomplete` means
+   output/parse loss even when retrieval resolved; preserve loss reasons,
+   oversized-record counts and unknown unprocessed tails. The CLI bounds each
+   complete record and combined stdout/stderr by UTF-8 bytes; obtain defaults
+   and finite ranges from command help. A larger finite allowance requires an
+   explicit investigation decision; exhaustion calls for a narrower-query
+   decision within the same authorization and ledger, never automatic requery.
+   Keep JSONL records whole for downstream redaction. Business-field redaction
+   remains the workspace entrypoint's responsibility; complete CLI records do
+   not establish that free text is safe to expose.
+5. Follow evidence within the settled ledger. Empty successful, resolved
    retrieval means no matches under the selected conditions. Saturation,
    parse loss, unresolved intervals, or errors leave retrieval gaps; stdout
    may still hold valid partial evidence. Trace coverage and record budgets count

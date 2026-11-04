@@ -147,6 +147,39 @@ with status `4`. If every record is malformed, stdout stays empty.
 
 The CLI retries only `429`, `502`, `503`, and `504` responses, at most twice, and honors `Retry-After`. The default request timeout is 30 seconds. Tokens are read only from the environment variable named by the profile and never enter the command line or configuration file.
 
+## Output budgets
+
+Ordinary log and metric queries bound all human, raw and JSONL output by final
+UTF-8 bytes, including escaping and newlines. `--max-record-bytes` defaults to
+4194304 (4 MiB), range 1–8388608 (8 MiB). `--max-output-bytes` defaults to
+1048576 (1 MiB), range 1–33554432 (32 MiB), shared by stdout and stderr.
+Only positive integers within these limits are accepted, before networking;
+there is no unlimited mode. KiB = 1024 bytes; MiB = 1024 KiB.
+
+Up to 2 KiB of the total is reserved for status and final HTTP accounting.
+Records over the single-record allowance are dropped whole and counted;
+subsequent records may still be displayed. When the next eligible complete
+record cannot fit the remaining total, body output stops in the existing order;
+later smaller records are not sampled. Log fields are never clipped. Every
+emitted JSONL record remains complete JSON. Very small totals may allow only
+`incomplete` status, or no status if even that cannot fit.
+
+The stderr `evidence: {...}` JSON status separates `upstream_retrieval` from
+`local_evidence`, includes effective byte limits, loss reasons/counts, and marks
+an unprocessed tail as `unknown` rather than inventing its record count. Empty
+success still reports status. Local drops, parse loss or output exhaustion return
+`4`; authentication retains `3`. Upstream record-limit saturation alone may
+return `0` with incomplete retrieval and complete local evidence. A log JSON
+report adds `evidence` without changing retrieved coverage; display loss does
+not turn resolved intervals into retrieval gaps. Stdout contains no summary
+records. Explicit HTTP attempt accounting remains exactly once on stderr's
+last line. Errors and diagnostics share the output allowance.
+
+These limits bound evidence delivery, not process RSS or upstream ingestion.
+An evidence gap calls for an explicit narrower-query decision, never automatic
+requery or a broader scope. The generic CLI preserves complete log text;
+workspace-specific business redaction remains the wrapper's responsibility.
+
 ## Log completeness reports
 
 Every ordinary log query writes one coverage/resource summary to stderr. A
