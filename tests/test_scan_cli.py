@@ -63,6 +63,19 @@ class ScanCliTests(unittest.TestCase):
         self.assertEqual(len(report['coverage']['resolved']), 1)
         self.assertTrue(all('retained_bytes' in gap['reasons'] for gap in report['coverage']['unresolved']))
 
+    def test_exact_retained_capacity_stops_next_interval_with_local_loss(self) -> None:
+        first = [{'stream': {}, 'values': [['900000000001', 'okay']]}]
+        self.assertEqual(self.invoke([first], '--end', '1970-01-01T00:30:00Z',
+                                     '--max-retained-bytes', '68', '--max-http-attempts', '2'), 4)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual([json.loads(line)['line'] for line in self.stdout.getvalue().splitlines()], ['okay'])
+        report = self.read_report()
+        self.assertEqual(report['stop_reasons'], ['retained_bytes'])
+        self.assertEqual(report['evidence']['local_evidence'], 'incomplete')
+        self.assertEqual(report['evidence']['losses'], {'retained_bytes': 1})
+        self.assertIn('"local_evidence":"incomplete"', self.stderr.getvalue())
+        self.assertIn('"retained_bytes":1', self.stderr.getvalue())
+
     def test_display_loss_keeps_resolved_coverage_and_full_checkpoint(self) -> None:
         work = self.config.parent / 'archive'
         records = [{'stream': {}, 'values': [['1', 'x' * 900], ['2', 'small']]}]
