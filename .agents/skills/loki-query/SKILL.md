@@ -82,7 +82,16 @@ Resolve command syntax and type-specific options from CLI help and the
    consumes the shared retained-byte allowance before exact field/path or label
    matching, including unmatched records. Trace checkpoints retain full candidates
    and the final presentation evidence; zero matches after a resource loss leave
-   a retrieval gap. These byte budgets do not bound exact process RSS.
+   a retrieval gap. Export/resume bound actual archive file bytes before JSON
+   decoding with the effective retained-byte cap, then charge decoded canonical
+   records separately. Archive overflow returns 4 with the original state intact;
+   corrupt state remains configuration failure 2. Offline export needs no config,
+   credentials or HTTP and preserves the archive. Each export/resume computes fresh
+   local presentation evidence while retaining historical retrieval coverage and
+   totals; past display loss never makes a resolved interval eligible for HTTP.
+   A fully resolved resume needs no token or requests. All archive formats share
+   record/output caps; terminal clipping preserves full archived evidence.
+   These byte budgets do not bound exact process RSS.
    Keep JSONL records whole for downstream redaction. Business-field redaction
    remains the workspace entrypoint's responsibility; complete CLI records do
    not establish that free text is safe to expose.

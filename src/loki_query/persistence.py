@@ -11,7 +11,8 @@ from pathlib import Path
 import tempfile
 from typing import Any, BinaryIO
 
-from .client import LogEntry, ParseSummary, QueryResult
+from .client import (LogEntry, ParseSummary, QueryResult, DEFAULT_RETAINED_BYTES,
+                     QueryResourceError, RetainedBudget, canonical_record_size)
 from .config import ConfigurationError
 from .scanning import ScanInterval, ScanOutcome
 
@@ -127,13 +128,22 @@ class WorkDirectory:
                 except OSError:
                     pass
 
-    def load(self) -> tuple[dict[str, Any], ScanOutcome]:
+    def load(self, max_retained_bytes: int = DEFAULT_RETAINED_BYTES) -> tuple[dict[str, Any], ScanOutcome]:
         try:
-            document = json.loads((self.path / STATE_NAME).read_text(encoding='utf-8'))
+            chunks = bytearray()
+            with (self.path / STATE_NAME).open('rb') as source:
+                while True:
+                    chunk = source.read(min(65536, max_retained_bytes - len(chunks) + 1))
+                    if not chunk:
+                        break
+                    if len(chunks) + len(chunk) > max_retained_bytes:
+                        raise QueryResourceError('archive_bytes: incomplete archive; actual file byte budget exhausted.')
+                    chunks.extend(chunk)
+            document = json.loads(chunks)
             payload = document['payload']
             if document['sha256'] != hashlib.sha256(_canonical(payload)).hexdigest():
                 raise ValueError('checkpoint checksum mismatch')
-            return _decode(payload)
+            return _decode(payload, max_retained_bytes)
         except (OSError, UnicodeError, ValueError, TypeError, KeyError, OverflowError) as error:
             raise ConfigurationError('Unusable scan state: missing, corrupt, incomplete, or incompatible checkpoint/evidence.') from error
 
@@ -147,7 +157,7 @@ def _integer(value: Any, *, minimum: int | None = None) -> int:
     return parsed
 
 
-def _decode(payload: Any) -> tuple[dict[str, Any], ScanOutcome]:
+def _decode(payload: Any, max_retained_bytes: int = DEFAULT_RETAINED_BYTES) -> tuple[dict[str, Any], ScanOutcome]:
     if payload['schema_version'] != 1:
         raise ValueError('unsupported state version')
     identity, report = payload['identity'], payload['report']
@@ -165,6 +175,7 @@ def _decode(payload: Any) -> tuple[dict[str, Any], ScanOutcome]:
         raise ValueError('invalid query range')
     if not isinstance(identity['profile'], str) or not isinstance(identity['target']['endpoint'], str) or not isinstance(identity['target']['datasource_uid'], str):
         raise ValueError('invalid target')
+    retained = RetainedBudget(max_retained_bytes)
     intervals: list[ScanInterval] = []
     for item in payload['intervals']:
         lower, upper = _integer(item['start_ns']), _integer(item['end_ns'])
@@ -185,7 +196,9 @@ def _decode(payload: Any) -> tuple[dict[str, Any], ScanOutcome]:
                 labels = record['labels']
                 if not isinstance(labels, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in labels.items()):
                     raise ValueError('invalid evidence labels')
-                records.append(LogEntry(timestamp, labels, record['line']))
+                decoded = LogEntry(timestamp, labels, record['line'])
+                retained.replace(0, canonical_record_size(decoded))
+                records.append(decoded)
             if type(evidence['raw_count_exact']) is not bool:
                 raise ValueError('invalid raw count status')
             result = QueryResult('log', list(records), ParseSummary(

@@ -71,6 +71,67 @@ class PersistenceCliTests(unittest.TestCase):
         for path in self.work.iterdir():
             self.assertNotIn('private-bearer-value', path.read_text())
 
+    def test_archive_file_byte_cap_is_inclusive_and_refusal_preserves_state(self) -> None:
+        rows = [{'stream': {'app': '中文'}, 'values': [['1', '多字节证据']]}]
+        self.assertEqual(self.scan([[], rows], '--work-dir', str(self.work)), 0)
+        state = self.work / 'state.json'
+        original = state.read_bytes()
+        self.assertEqual(self.export('--max-retained-bytes', str(len(original)))[0], 0)
+        code, output, error = self.export('--max-retained-bytes', str(len(original) - 1))
+        self.assertEqual((code, output), (4, ''), error)
+        self.assertIn('archive_bytes', error)
+        self.assertEqual(state.read_bytes(), original)
+
+    def test_export_fresh_display_does_not_replay_historical_parse_or_resource_loss(self) -> None:
+        malformed = [{'stream': {}, 'values': [['900000000001', 'kept'], ['bad', 'lost']]}]
+        self.assertEqual(self.scan([malformed, []], '--work-dir', str(self.work)), 4)
+        report = self.root / 'display.json'
+        code, output, error = self.export('--report', str(report))
+        self.assertEqual(code, 4, error)
+        self.assertIn('kept', output)
+        displayed = json.loads(report.read_text())
+        self.assertEqual(displayed['evidence']['local_evidence'], 'complete')
+        self.assertEqual(displayed['usage']['current']['skipped_entries'], 0)
+        self.assertEqual(displayed['counts']['skipped_entries'], 1)
+        self.assertEqual(displayed['current_losses'], {})
+
+    def test_decoded_records_have_a_separate_canonical_retention_charge(self) -> None:
+        rows = [{'stream': {}, 'values': [['1', '']] * 1000}]
+        self.assertEqual(self.scan([[], rows], '--limit', '5000', '--work-dir', str(self.work)), 0)
+        state = self.work / 'state.json'
+        original = state.read_bytes()
+        code, output, error = self.export('--max-retained-bytes', str(len(original)))
+        self.assertEqual((code, output), (4, ''), error)
+        self.assertIn('retained_bytes', error)
+        self.assertEqual(state.read_bytes(), original)
+
+    def test_every_export_format_applies_fresh_output_limits_without_trimming_archive(self) -> None:
+        rows = [{'stream': {'app': '中文'}, 'values': [['1', '保存的完整证据']]}]
+        self.assertEqual(self.scan([[], rows], '--work-dir', str(self.work)), 0)
+        original = (self.work / 'state.json').read_bytes()
+        for output_format in ('human', 'raw', 'jsonl'):
+            with self.subTest(output=output_format):
+                code, output, error = self.export('--output', output_format, '--max-record-bytes', '1')
+                self.assertEqual((code, output), (4, ''), error)
+                self.assertIn('record_too_large', error)
+                code, output, error = self.export('--output', output_format)
+                self.assertEqual(code, 0, error)
+                self.assertIn('保存的完整证据', output)
+                self.assertNotIn('record_too_large', error)
+                self.assertEqual((self.work / 'state.json').read_bytes(), original)
+
+    def test_oversized_corrupt_archive_is_refused_before_json_decoding(self) -> None:
+        self.work.mkdir()
+        state = self.work / 'state.json'
+        original = b'{' + b'x' * 8192
+        state.write_bytes(original)
+        code, output, error = self.export('--max-retained-bytes', '8192')
+        self.assertEqual((code, output), (4, ''), error)
+        self.assertIn('archive_bytes', error)
+        self.assertNotIn('Unusable scan state', error)
+        self.assertEqual(state.read_bytes(), original)
+        self.assertEqual(self.export('--max-retained-bytes', '8193')[0], 2)
+
     def test_export_cannot_overwrite_the_checkpoint_with_its_report(self) -> None:
         self.assertEqual(self.scan([[], []], '--work-dir', str(self.work)), 0)
         code, output, error = self.export('--report', str(self.work / 'state.json'))

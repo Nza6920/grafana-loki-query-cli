@@ -47,6 +47,31 @@ class TraceScanCliTests(unittest.TestCase):
                     opener=opener, stdout=out, stderr=err, now=datetime(2026, 10, 22, tzinfo=UTC))
         return code, out.getvalue(), err.getvalue(), json.loads(report.read_text()) if report.exists() else {}
 
+    def test_offline_trace_formats_reset_display_limits_and_resolved_resume_uses_no_http(self) -> None:
+        line = '{"trace_id":"abc","message":"完整证据"}'
+        rows = [{'stream': {'app': 'api'}, 'values': [['1', line]]}]
+        code, _, error, _ = self.invoke('trace', [rows], '--scan', '--work-dir', str(self.work),
+                                         '--max-record-bytes', '1')
+        self.assertEqual(code, 4, error)
+        state = self.work / 'state.json'
+        original = state.read_bytes()
+        for output_format in ('human', 'raw', 'jsonl'):
+            with self.subTest(output=output_format):
+                code, output, error, report = self.invoke('export', [], '--work-dir', str(self.work),
+                    '--output', output_format, '--max-record-bytes', '1', token=False)
+                self.assertEqual((code, output), (4, ''), error)
+                self.assertIn('record_too_large', error)
+                code, output, error, report = self.invoke('export', [], '--work-dir', str(self.work),
+                    '--output', output_format, token=False)
+                self.assertEqual(code, 0, error)
+                self.assertIn('完整证据', output)
+                self.assertEqual(report['evidence']['local_evidence'], 'complete')
+                self.assertEqual(state.read_bytes(), original)
+        code, output, error, report = self.invoke('resume', [], '--work-dir', str(self.work), token=False)
+        self.assertEqual(code, 0, error)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(report['usage']['current']['http_attempts'], 0)
+
     def test_trace_scan_saves_candidates_and_resumes_only_unresolved_child(self) -> None:
         line = '{"trace_id":"abc"}'
         parent = [{'stream': {'app': 'api'}, 'values': [['1', line], ['1', line],

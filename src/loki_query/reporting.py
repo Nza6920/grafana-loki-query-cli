@@ -75,16 +75,17 @@ def _redact(value: Any, token: str) -> Any:
 def write_log_report(
     report: dict[str, Any], destination: str | None, stderr: TextIO, *, token: str,
 ) -> None:
-    set_retrieval_status(stderr, report["status"])
-    if report["status"] == "failed" and isinstance(stderr, BudgetedStream):
-        stderr.budget.mark_loss("request_failed")
     counts, usage = report["counts"], report["usage"]["current"]
+    set_retrieval_status(stderr, report["status"])
+    if isinstance(stderr, BudgetedStream) and (usage.get("skipped_entries", 0) or usage.get("skipped_series", 0)):
+        if "parse_loss" not in stderr.budget.losses:
+            stderr.budget.mark_loss("parse_loss")
     reasons = [reason for interval in report["coverage"]["unresolved"] for reason in interval["reasons"]]
     resource_reasons = sorted(set(reasons) & {"response_bytes", "retained_bytes", "response_timeout"})
-    if resource_reasons and isinstance(stderr, BudgetedStream):
-        for reason in resource_reasons:
+    if isinstance(stderr, BudgetedStream):
+        for reason, count in report.get("current_losses", {}).items():
             if reason not in stderr.budget.losses:
-                stderr.budget.mark_loss(reason)
+                stderr.budget.mark_loss(reason, count)
     warning = ""
     if reasons:
         warning = "warning: incomplete results; "
