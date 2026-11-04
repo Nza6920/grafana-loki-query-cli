@@ -11,7 +11,7 @@ from urllib.request import Request
 
 from .client import AuthenticationError, HttpAttemptBudgetError, LogEntry, Opener, QueryError, QueryResourceError, QueryTimeoutError, QueryResult, ReadableResponse, Sleeper, query_range
 from .config import ConfigurationError, load_config
-from .output import format_timestamp_utc, write_result
+from .output import BudgetedStream, format_timestamp_utc, set_retrieval_status, write_record, write_result
 from .persistence import WorkDirectory
 from .scanning import ScanOptions, ScanOutcome, scan_range
 from .reporting import log_report, validate_report_destination, write_log_report
@@ -172,8 +172,8 @@ def write_trace_result(result: QueryResult, output_format: str, stream: TextIO, 
             service = json.dumps(record.labels.get(service_field) or 'unknown', ensure_ascii=False)
             namespace = json.dumps(record.labels.get('namespace') or 'unknown', ensure_ascii=False)
             labels = json.dumps(record.labels, ensure_ascii=False, separators=(',', ':'))
-            print(f'{format_timestamp_utc(record.timestamp_ns)} service={service} namespace={namespace} '
-                  f'{labels} {record.line}', file=stream)
+            write_record(f'{format_timestamp_utc(record.timestamp_ns)} service={service} namespace={namespace} '
+                         f'{labels} {record.line}\n', stream)
 
 def trace_metadata(trace_id: str, source: str, selector: str, fields: list[str], paths: list[str],
                    mapping: tuple[tuple[str, ...], ...]) -> dict[str, Any]:
@@ -207,6 +207,13 @@ def write_trace_outcome(outcome: ScanOutcome, args: argparse.Namespace, stdout: 
 def _write_trace_presentation(result: QueryResult, matches: QueryResult, report: dict[str, Any],
                               args: argparse.Namespace, stdout: TextIO, stderr: TextIO,
                               *, token: str, exit_code: int) -> int:
+    current = report['usage']['current']
+    parse_loss = (bool(current['skipped_entries'] or current['skipped_series'])
+                  if 'skipped_entries' in current else result.skipped.incomplete)
+    set_retrieval_status(stderr, report['status'], parse_loss=parse_loss)
+    if isinstance(stderr, BudgetedStream):
+        for reason, count in report.get('current_losses', {}).items():
+            stderr.budget.mark_loss(reason, count)
     write_trace_result(matches, args.output, stdout, service_field=args.service_field)
     print('Trace timeline: equal timestamps do not imply causality.', file=stderr)
     print(f'Trace candidates: {len(result.records)} examined, {len(matches.records)} matched.', file=stderr)
@@ -316,6 +323,9 @@ def run_trace(
                 work.validate_report(args.report)
                 work.require_new()
                 outcome = execute_scan(work)
+                code = write_trace_outcome(outcome, args, stdout, stderr, token=token)
+                work.save(outcome, identity=identity)
+                return code
         else:
             outcome = execute_scan()
         return write_trace_outcome(outcome, args, stdout, stderr, token=token)
