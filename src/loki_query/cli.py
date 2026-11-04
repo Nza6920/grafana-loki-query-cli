@@ -203,6 +203,10 @@ def build_parser(
     )
     config_subparsers.add_parser("path", help="Print the default configuration path.")
     config_subparsers.add_parser("validate", help="Validate the configuration file.")
+    trace_parser.add_argument("--max-record-bytes", type=_record_bytes, default=DEFAULT_RECORD_BYTES,
+                              help="Complete rendered record bytes (1-8388608; default: 4194304 / 4 MiB).")
+    trace_parser.add_argument("--max-output-bytes", type=_output_bytes, default=DEFAULT_OUTPUT_BYTES,
+                              help="Combined stdout/stderr bytes (1-33554432; default: 1048576 / 1 MiB).")
     for data_parser in (query_parser, trace_parser, resume_parser):
         data_parser.add_argument("--max-response-bytes", type=lambda value: _byte_budget(value, MAX_RESPONSE_BYTES),
                                  default=DEFAULT_RESPONSE_BYTES, help="Actual HTTP body bytes (1-67108864; default: 33554432 / 32 MiB).")
@@ -296,7 +300,7 @@ def main(
         return outcome.status
     budget = (OutputBudget(args.max_record_bytes, args.max_output_bytes,
                            max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes)
-              if args.command == "query" else None)
+              if args.command in ("query", "trace") else None)
     if budget is not None:
         budget.ensure_status_capacity()
     original_error_stream = error_stream

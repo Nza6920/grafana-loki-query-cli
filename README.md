@@ -149,7 +149,8 @@ The CLI retries only `429`, `502`, `503`, and `504` responses, at most twice, an
 
 ## Output budgets
 
-Ordinary log and metric queries bound all human, raw and JSONL output by final
+Ordinary log/metric queries and ordinary/scanning trace timelines bound all
+human, raw and JSONL output by final
 UTF-8 bytes, including escaping and newlines. `--max-record-bytes` defaults to
 4194304 (4 MiB), range 1–8388608 (8 MiB). `--max-output-bytes` defaults to
 1048576 (1 MiB), range 1–33554432 (32 MiB), shared by stdout and stderr.
@@ -395,6 +396,13 @@ investigation. Resume uses the same atomic publication and exclusive writer lock
 as initial scans; offline export remains available after interruption.
 
 ## Trace timelines
+
+Trace candidate retention is charged before exact matching, across all returned
+streams and selected fields. Unmatched candidates consume the same cumulative
+byte allowance as matches. The independent human timeline and candidate/zero-match
+diagnostics share the output budget with raw/JSONL and stderr. Response or
+retention loss leaves retrieval gaps; display loss preserves retrieved coverage.
+Trace checkpoints retain full candidates and final presentation evidence.
 
 Use an explicitly selected profile, a single stream selector, and an explicit
 relative or absolute time boundary:

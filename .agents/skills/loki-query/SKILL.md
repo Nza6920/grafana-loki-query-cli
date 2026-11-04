@@ -77,7 +77,12 @@ Resolve command syntax and type-specific options from CLI help and the
    earlier evidence and report unresolved intervals without automatic recovery.
    Read report/checkpoint `evidence` separately from retrieval `coverage`: display
    loss returns 4 while resolved coverage and full archived records survive.
-   These byte budgets do not bound exact process RSS.
+   Trace applies these rules to ordinary and scan executions, including its human
+   timeline and candidate/zero-match diagnostics. Every returned candidate stream
+   consumes the shared retained-byte allowance before exact field/path or label
+   matching, including unmatched records. Trace checkpoints retain full candidates
+   and the final presentation evidence; zero matches after a resource loss leave
+   a retrieval gap. These byte budgets do not bound exact process RSS.
    Keep JSONL records whole for downstream redaction. Business-field redaction
    remains the workspace entrypoint's responsibility; complete CLI records do
    not establish that free text is safe to expose.
