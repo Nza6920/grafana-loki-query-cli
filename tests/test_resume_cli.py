@@ -56,6 +56,17 @@ class ResumeCliTests(unittest.TestCase):
                     now=now or datetime(1970, 1, 1, 0, 30, tzinfo=UTC), sleeper=sleep)
         return code, stdout.getvalue(), stderr.getvalue(), json.loads(report.read_text()) if report.exists() else {}
 
+    def test_resume_retention_counts_saved_baseline_before_new_response(self) -> None:
+        later = [{'stream': {}, 'values': [['900000000001', 'baseline']]}]
+        self.assertEqual(self.invoke('query', [later], '--max-http-attempts', '1')[0], 4)
+        earlier = [{'stream': {}, 'values': [['1', 'candidate']]}]
+        code, output, error, report = self.invoke('resume', [earlier], '--max-retained-bytes', '130')
+        self.assertEqual(code, 4, error)
+        self.assertEqual([json.loads(line)['line'] for line in output.splitlines()], ['baseline'])
+        self.assertEqual(report['stop_reasons'], ['retained_bytes'])
+        self.assertEqual(report['usage']['current']['retained_bytes'], report['usage']['cumulative']['retained_bytes'])
+        self.assertEqual(len(self.requests), 2)
+
     def test_second_process_resume_freezes_bounds_skips_complete_and_rotates_token(self) -> None:
         later = [{'stream': {}, 'values': [['900000000001', 'frozen']]}]
         earlier = [{'stream': {}, 'values': [['1', 'retried']]}]

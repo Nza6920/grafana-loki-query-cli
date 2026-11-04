@@ -8,7 +8,7 @@ from urllib.request import Request
 
 from .client import (
     AuthenticationError, InvalidQueryError, Opener, ParseSummary, QueryError,
-    QueryResult, QueryTimeoutError, QueryResourceError, DEFAULT_RESPONSE_BYTES, DEFAULT_RETAINED_BYTES, ReadableResponse, Record, Sleeper, query_range,
+    RetainedBudget, canonical_record_size, QueryResult, QueryTimeoutError, QueryResourceError, DEFAULT_RESPONSE_BYTES, DEFAULT_RETAINED_BYTES, ReadableResponse, Record, Sleeper, query_range,
 )
 from .config import Profile
 from .reporting import log_report
@@ -67,9 +67,17 @@ def scan_range(
         if direction == 'backward':
             intervals.reverse()
     else:
-        intervals = deepcopy(seed.intervals)
+        intervals = [replace(item, reasons=list(item.reasons),
+                             result=replace(item.result, records=list(item.result.records))
+                             if item.result is not None else None) for item in seed.intervals]
         for item in intervals:
             item.sample_from_current_run = False
+    retained_bytes = RetainedBudget(options.max_retained_bytes)
+
+    def interval_bytes(item: ScanInterval) -> int:
+        return sum(canonical_record_size(record) for record in item.result.records) if item.result is not None else 0
+
+    retained_bytes.replace(0, sum(interval_bytes(item) for item in intervals))
     requested: list[tuple[ScanInterval, int]] = []
     previous_requests = deepcopy(seed.report.get('requests', [])) if seed is not None else []
     # Every checkpoint adds this execution to one immutable starting total.
@@ -114,14 +122,14 @@ def scan_range(
              'reasons': list(i.reasons)} for i, before in requested if i.http_attempts > before]
         current = report['usage']['current']
         current.update({'raw_entries': raw_entries, 'skipped_entries': skipped_entries,
-                        'skipped_series': skipped_series, 'retained_records': charged_records()})
+                        'skipped_series': skipped_series, 'retained_records': charged_records(), 'retained_bytes': retained_bytes.used})
         report['usage']['cumulative'] = {
             'http_attempts': baseline_usage.get('http_attempts', 0) + attempts,
             'elapsed_seconds': baseline_usage.get('elapsed_seconds', 0.0) + current['elapsed_seconds'],
             'raw_entries': combined.raw_entries,
             'skipped_entries': combined.skipped.skipped_entries,
             'skipped_series': combined.skipped.skipped_series,
-            'retained_records': len(records),
+            'retained_records': len(records), 'retained_bytes': retained_bytes.used,
         }
         report['status'] = 'failed' if fatal_code else 'incomplete' if report['coverage']['unresolved'] else 'complete'
         report['stop_reasons'] = stop_reasons
@@ -180,6 +188,9 @@ def scan_range(
             if capacity <= 0:
                 raise BudgetStopped("record_budget")
             request_limit = min(options.limit, capacity)
+            byte_capacity = options.max_retained_bytes - retained_bytes.used + interval_bytes(interval)
+            if byte_capacity <= 0:
+                raise BudgetStopped("retained_bytes")
             check_budget()
             interval.request_limit = request_limit
             requested.append((interval, interval.http_attempts))
@@ -188,7 +199,7 @@ def scan_range(
                                  limit=request_limit, direction=direction,
                                  timeout=options.timeout, opener=bounded_opener, sleeper=bounded_sleep,
                                  monotonic=monotonic, max_response_bytes=options.max_response_bytes,
-                                 max_retained_bytes=options.max_retained_bytes)
+                                 max_retained_bytes=byte_capacity)
         except BudgetStopped as error:
             stop_reasons = [str(error)]
             if interval.http_attempts:
@@ -200,10 +211,15 @@ def scan_range(
             stop_reasons = [reason]
             fatal_code = 3 if isinstance(error, AuthenticationError) else 4
             break
+        except QueryResourceError as error:
+            interval.reasons = [str(error).split(":", 1)[0]]
+            if interval.reasons == ["retained_bytes"]:
+                stop_reasons = list(interval.reasons)
+                break
         except QueryError as error:
-            interval.reasons = ["timeout" if isinstance(error, QueryTimeoutError)
-                                else str(error).split(":", 1)[0] if isinstance(error, QueryResourceError) else "request_failed"]
+            interval.reasons = ["timeout" if isinstance(error, QueryTimeoutError) else "request_failed"]
         else:
+            previous_bytes = interval_bytes(interval)
             previous_result, previous_origin = interval.result, interval.sample_origin
             previous_owner = interval.sample_from_current_run
             interval.result = replace(result, records=[
@@ -223,6 +239,7 @@ def scan_range(
                     and len(previous_result.records) > len(interval.result.records)):
                 interval.result, interval.sample_origin = previous_result, previous_origin
                 interval.sample_from_current_run = previous_owner
+            retained_bytes.replace(previous_bytes, interval_bytes(interval))
             raw_count_exact = raw_count_exact and result.raw_count_exact
             raw_entries += result.raw_entries
             skipped_entries += result.skipped.skipped_entries
@@ -243,6 +260,8 @@ def scan_range(
                     child.reasons = ["unqueried", *interval.reasons]
                 if direction == 'backward':
                     children.reverse()
+                # Request history keeps the parent metadata, not obsolete evidence.
+                interval.result = None
                 intervals[position:position + 1] = children
                 checkpoint()
                 continue
