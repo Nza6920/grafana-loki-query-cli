@@ -8,7 +8,7 @@ from urllib.request import Request
 
 from .client import (
     AuthenticationError, InvalidQueryError, Opener, ParseSummary, QueryError,
-    QueryResult, QueryTimeoutError, ReadableResponse, Record, Sleeper, query_range,
+    QueryResult, QueryTimeoutError, QueryResourceError, DEFAULT_RESPONSE_BYTES, DEFAULT_RETAINED_BYTES, ReadableResponse, Record, Sleeper, query_range,
 )
 from .config import Profile
 from .reporting import log_report
@@ -21,6 +21,8 @@ class ScanOptions:
     max_elapsed_seconds: float = 300.0
     max_records: int = 10000
     timeout: float = 30.0
+    max_response_bytes: int = DEFAULT_RESPONSE_BYTES
+    max_retained_bytes: int = DEFAULT_RETAINED_BYTES
 
 
 @dataclass
@@ -125,7 +127,8 @@ def scan_range(
         report['stop_reasons'] = stop_reasons
         report['budgets'] = {'max_http_attempts': options.max_http_attempts,
                              'max_elapsed_seconds': options.max_elapsed_seconds,
-                             'max_records': options.max_records, 'request_timeout_seconds': options.timeout}
+                             'max_records': options.max_records, 'request_timeout_seconds': options.timeout,
+                             'max_response_bytes': options.max_response_bytes, 'max_retained_bytes': options.max_retained_bytes}
         return ScanOutcome(combined, report, fatal_code or (4 if report['coverage']['unresolved'] else 0), intervals)
 
     def checkpoint() -> None:
@@ -183,7 +186,9 @@ def scan_range(
             result = query_range(profile=profile, token=token, query=query,
                                  start_ns=interval.start_ns, end_ns=interval.end_ns,
                                  limit=request_limit, direction=direction,
-                                 timeout=options.timeout, opener=bounded_opener, sleeper=bounded_sleep)
+                                 timeout=options.timeout, opener=bounded_opener, sleeper=bounded_sleep,
+                                 monotonic=monotonic, max_response_bytes=options.max_response_bytes,
+                                 max_retained_bytes=options.max_retained_bytes)
         except BudgetStopped as error:
             stop_reasons = [str(error)]
             if interval.http_attempts:
@@ -196,7 +201,8 @@ def scan_range(
             fatal_code = 3 if isinstance(error, AuthenticationError) else 4
             break
         except QueryError as error:
-            interval.reasons = ["timeout" if isinstance(error, QueryTimeoutError) else "request_failed"]
+            interval.reasons = ["timeout" if isinstance(error, QueryTimeoutError)
+                                else str(error).split(":", 1)[0] if isinstance(error, QueryResourceError) else "request_failed"]
         else:
             previous_result, previous_origin = interval.result, interval.sample_origin
             previous_owner = interval.sample_from_current_run

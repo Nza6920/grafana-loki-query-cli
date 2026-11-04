@@ -564,3 +564,27 @@ in `pyproject.toml`. GitHub Actions runs the unit tests, compilation checks and
 the same strict type check on pushes and pull requests using Python 3.11.
 
 A production smoke test should use a temporary configuration, the last 15 minutes, and `limit=1`. Its report should record only whether the request succeeded and the number of results, without reproducing log content.
+
+## HTTP and retained data budgets
+
+Every query, trace, scan and resume response is read in bounded chunks before
+JSON decoding. `--max-response-bytes` defaults to 32 MiB (33,554,432 bytes),
+with a valid range of 1–67,108,864 bytes (64 MiB). Actual body bytes count;
+missing or inaccurate Content-Length does not bypass the cap. Exactly the cap
+is accepted. An oversized body is closed and rejected without parsing partial
+JSON or adding retries. The existing `--timeout` also bounds body reception
+across continuous slow output, rather than restarting for each read.
+
+`--max-retained-bytes` defaults to 64 MiB (67,108,864 bytes), valid from 1 to
+268,435,456 bytes (256 MiB). Ordinary log and metric queries charge each complete
+record's deterministic compact, sorted-key UTF-8 JSON, including its type,
+nanosecond timestamp, labels and line/value. A response exceeding retention is
+rejected atomically, preserving ordering rather than selecting a wire-order
+prefix. This is a data budget, not an exact process RSS limit. Multi-request
+cumulative retention and archive loading are separate delivery boundaries.
+
+Invalid budgets return 2 before HTTP; response/retention overflow and reception
+timeout return 4 with incomplete evidence and unresolved retrieval. Authentication
+failures retain exit 3. Limits and loss reasons are reported on stderr; JSONL
+stdout contains only complete records. No resource error adds automatic retries,
+slicing or a wider query. Choose a narrower query explicitly after exhaustion.

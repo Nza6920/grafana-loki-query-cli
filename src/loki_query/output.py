@@ -5,7 +5,7 @@ from io import TextIOBase
 import json
 from typing import TextIO
 
-from .client import LogEntry, MetricSample, QueryResult
+from .client import LogEntry, MetricSample, QueryResult, DEFAULT_RESPONSE_BYTES, DEFAULT_RETAINED_BYTES
 
 
 def format_timestamp_utc(timestamp_ns: int) -> str:
@@ -70,7 +70,11 @@ MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 class OutputBudget:
     """One invocation's UTF-8 output allowance, shared by both streams."""
 
-    def __init__(self, record_bytes: int, output_bytes: int) -> None:
+    def __init__(self, record_bytes: int, output_bytes: int, *,
+                 max_response_bytes: int = DEFAULT_RESPONSE_BYTES,
+                 max_retained_bytes: int = DEFAULT_RETAINED_BYTES) -> None:
+        self.max_response_bytes = max_response_bytes
+        self.max_retained_bytes = max_retained_bytes
         self.record_bytes = record_bytes
         self.output_bytes = output_bytes
         self.reserve = min(2048, output_bytes)
@@ -101,6 +105,8 @@ class OutputBudget:
         return {
             "upstream_retrieval": self.upstream_status,
             "local_evidence": "incomplete" if self.losses else "complete",
+            "max_response_bytes": self.max_response_bytes,
+            "max_retained_bytes": self.max_retained_bytes,
             "max_record_bytes": self.record_bytes,
             "max_output_bytes": self.output_bytes,
             "losses": dict(self.losses),
