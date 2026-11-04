@@ -104,7 +104,7 @@ class CompletenessCliTests(unittest.TestCase):
         self.assertEqual(json.loads(self.stdout.getvalue())["line"], "valid")
         self.assertIn("possible truncation", self.stderr.getvalue())
         self.assertIn("skipped 1 series", self.stderr.getvalue())
-        self.assertEqual(len(self.stderr.getvalue().splitlines()), 1)
+        self.assertEqual(len(self.stderr.getvalue().splitlines()), 2)
 
     def test_retry_failure_reports_attempts_elapsed_waits_and_unresolved_bounds(self) -> None:
         elapsed = 10.0

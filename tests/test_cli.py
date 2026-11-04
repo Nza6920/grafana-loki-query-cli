@@ -354,7 +354,8 @@ class QueryTests(unittest.TestCase):
                         )
                     self.assertIs(raised.exception, failure)
                     self.assertEqual(stdout.getvalue(), "")
-                    self.assertEqual(stderr.getvalue(), "")
+                    self.assertIn('"local_evidence":"incomplete"', stderr.getvalue())
+                    self.assertIn('"execution_interrupted":1', stderr.getvalue())
 
     def test_end_is_only_valid_with_absolute_start(self) -> None:
         invalid_modes = (
@@ -807,7 +808,8 @@ default_selector = '{{namespace="prod"}}'
                     self.assertEqual(returncode, 4)
                     self.assertIn(valid_payload, stdout.getvalue())
                     warning_lines = stderr.getvalue().splitlines()
-                    self.assertEqual(len(warning_lines), 1)
+                    self.assertEqual(len(warning_lines), 2)
+                    self.assertTrue(warning_lines[1].startswith("evidence: "))
                     self.assertIn("incomplete results", warning_lines[0])
                     self.assertIn("skipped 1 series", warning_lines[0])
                     self.assertNotIn("SECRET", stderr.getvalue())
@@ -875,7 +877,8 @@ default_selector = '{{namespace="prod"}}'
 
                     self.assertEqual(returncode, 4)
                     self.assertEqual(stdout.getvalue(), "")
-                    self.assertEqual(len(stderr.getvalue().splitlines()), 1)
+                    self.assertEqual(len(stderr.getvalue().splitlines()), 2)
+                    self.assertIn('"parse_loss":1', stderr.getvalue())
                     self.assertIn("incomplete results", stderr.getvalue())
                     self.assertNotIn("SECRET", stderr.getvalue())
                     self.assertNotIn("hidden", stderr.getvalue())

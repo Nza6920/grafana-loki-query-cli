@@ -6,6 +6,7 @@ from typing import Any, TextIO
 
 from .client import QueryResult, query_endpoint
 from .config import ConfigurationError, Profile
+from .output import BudgetedStream, set_retrieval_status
 
 
 def log_report(
@@ -71,6 +72,9 @@ def _redact(value: Any, token: str) -> Any:
 def write_log_report(
     report: dict[str, Any], destination: str | None, stderr: TextIO, *, token: str,
 ) -> None:
+    set_retrieval_status(stderr, report["status"])
+    if report["status"] == "failed" and isinstance(stderr, BudgetedStream):
+        stderr.budget.mark_loss("request_failed")
     counts, usage = report["counts"], report["usage"]["current"]
     reasons = [reason for interval in report["coverage"]["unresolved"] for reason in interval["reasons"]]
     warning = ""
@@ -90,6 +94,8 @@ def write_log_report(
         "(query/range retrieval only; not ingestion completeness).",
         file=stderr,
     )
+    if isinstance(stderr, BudgetedStream):
+        report["evidence"] = stderr.budget.evidence_status()
     if destination is not None:
         try:
             Path(destination).expanduser().write_text(

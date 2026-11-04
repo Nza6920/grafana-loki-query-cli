@@ -25,7 +25,9 @@ usage: loki-query query [-h] --profile PROFILE [--query-type {log,metric}]
                         [--since SINCE | --start START] [--end END]
                         [--limit LIMIT] [--direction {backward,forward}]
                         [--step STEP] [--output {human,raw,jsonl}]
-                        [--timeout TIMEOUT] [--scan]
+                        [--timeout TIMEOUT]
+                        [--max-record-bytes MAX_RECORD_BYTES]
+                        [--max-output-bytes MAX_OUTPUT_BYTES] [--scan]
                         [--max-http-attempts MAX_HTTP_ATTEMPTS]
                         [--max-elapsed-seconds MAX_ELAPSED_SECONDS]
                         [--max-records MAX_RECORDS] [--work-dir WORK_DIR]
@@ -51,6 +53,12 @@ options:
   --output {human,raw,jsonl}
                         Output format (default: human).
   --timeout TIMEOUT     HTTP timeout in seconds (default: 30).
+  --max-record-bytes MAX_RECORD_BYTES
+                        Complete UTF-8 record bytes (1-8388608; default:
+                        4194304 / 4 MiB).
+  --max-output-bytes MAX_OUTPUT_BYTES
+                        Combined stdout/stderr bytes (1-33554432; default:
+                        1048576 / 1 MiB).
   --scan                Adaptively scan dense or timed-out intervals with
                         bounded execution.
   --max-http-attempts MAX_HTTP_ATTEMPTS
@@ -111,9 +119,9 @@ options:
 
 $ loki-query trace --help
 usage: loki-query trace [-h] --profile PROFILE --selector SELECTOR
-                        [--source {json,label}]
-                        (--since SINCE | --start START) [--end END]
-                        [--limit LIMIT] [--direction {backward,forward}]
+                        [--source {json,label}] (--since SINCE |
+                        --start START) [--end END] [--limit LIMIT]
+                        [--direction {backward,forward}]
                         [--output {human,raw,jsonl}]
                         [--service-field SERVICE_FIELD] [--field NAME]
                         [--path POINTER] [--timeout TIMEOUT]
