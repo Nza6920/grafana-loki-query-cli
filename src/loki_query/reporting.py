@@ -83,7 +83,8 @@ def write_log_report(
     resource_reasons = sorted(set(reasons) & {"response_bytes", "retained_bytes", "response_timeout"})
     if resource_reasons and isinstance(stderr, BudgetedStream):
         for reason in resource_reasons:
-            stderr.budget.mark_loss(reason)
+            if reason not in stderr.budget.losses:
+                stderr.budget.mark_loss(reason)
     warning = ""
     if reasons:
         warning = "warning: incomplete results; "

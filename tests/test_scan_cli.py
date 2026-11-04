@@ -122,6 +122,21 @@ class ScanCliTests(unittest.TestCase):
                 self.assertEqual(report['evidence']['losses'], {'output_budget': 1})
                 self.assertTrue(self.stderr.getvalue().endswith('HTTP attempt accounting: used=1 cap=1\n'))
 
+    def test_recovered_timeout_keeps_current_local_loss_after_coverage_resolves(self) -> None:
+        work = self.config.parent / 'recovered'
+        self.assertEqual(self.invoke([TimeoutError(), [], []],
+            '--work-dir', str(work), '--end', '1970-01-01T00:00:02Z'), 4)
+        report = self.read_report()
+        self.assertEqual(report['status'], 'complete')
+        self.assertEqual(report['coverage']['unresolved'], [])
+        self.assertEqual(report['evidence']['losses'], {'response_timeout': 1})
+        self.assertEqual(report['evidence']['local_evidence'], 'incomplete')
+        self.assertEqual(main(['--config', str(self.config), 'resume', '--profile', 'test',
+            '--work-dir', str(work), '--report', str(self.report)], environ={},
+            stdout=self.stdout, stderr=self.stderr,
+            opener=lambda request, timeout: self.fail('resolved coverage must not query')), 0)
+        self.assertEqual(self.read_report()['current_losses'], {})
+
     def test_scan_partitions_exact_half_open_intervals_and_freezes_query(self) -> None:
         self.assertEqual(self.invoke([[], [], []]), 0, self.stderr.getvalue())
         self.assertEqual([(r['start'][0], r['end'][0]) for r in self.requests],

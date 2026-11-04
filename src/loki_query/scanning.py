@@ -60,6 +60,7 @@ def scan_range(
     attempts = 0
     stop_reasons: list[str] = []
     fatal_code = 0
+    current_losses: dict[str, int] = {}
     width = 900_000_000_000
     if seed is None:
         intervals = [ScanInterval(start, min(start + width, end_ns))
@@ -133,6 +134,7 @@ def scan_range(
         }
         report['status'] = 'failed' if fatal_code else 'incomplete' if report['coverage']['unresolved'] else 'complete'
         report['stop_reasons'] = stop_reasons
+        report['current_losses'] = dict(current_losses)
         report['budgets'] = {'max_http_attempts': options.max_http_attempts,
                              'max_elapsed_seconds': options.max_elapsed_seconds,
                              'max_records': options.max_records, 'request_timeout_seconds': options.timeout,
@@ -212,11 +214,15 @@ def scan_range(
             fatal_code = 3 if isinstance(error, AuthenticationError) else 4
             break
         except QueryResourceError as error:
+            reason = str(error).split(":", 1)[0]
+            current_losses[reason] = current_losses.get(reason, 0) + 1
             interval.reasons = [str(error).split(":", 1)[0]]
             if interval.reasons == ["retained_bytes"]:
                 stop_reasons = list(interval.reasons)
                 break
         except QueryError as error:
+            if isinstance(error, QueryTimeoutError):
+                current_losses["response_timeout"] = current_losses.get("response_timeout", 0) + 1
             interval.reasons = ["timeout" if isinstance(error, QueryTimeoutError) else "request_failed"]
         else:
             previous_bytes = interval_bytes(interval)

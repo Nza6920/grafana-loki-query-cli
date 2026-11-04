@@ -519,6 +519,9 @@ def _dispatch(
                 set_retrieval_status(error_stream, outcome.report['status'],
                                      parse_loss=bool(outcome.report['usage']['current']['skipped_entries']
                                                      or outcome.report['usage']['current']['skipped_series']))
+                if isinstance(error_stream, BudgetedStream):
+                    for reason, count in outcome.report["current_losses"].items():
+                        error_stream.budget.mark_loss(reason, count)
                 write_result(outcome.result, args.output, output_stream)
                 write_log_report(outcome.report, args.report, error_stream, token=token)
 
