@@ -8,7 +8,7 @@ from urllib.request import Request
 
 from .client import (
     AuthenticationError, InvalidQueryError, Opener, ParseSummary, QueryError,
-    QueryResult, QueryTimeoutError, ReadableResponse, Record, Sleeper, query_range,
+    RetainedBudget, canonical_record_size, QueryResult, QueryTimeoutError, QueryResourceError, DEFAULT_RESPONSE_BYTES, DEFAULT_RETAINED_BYTES, ReadableResponse, Record, Sleeper, query_range, query_error_reason,
 )
 from .config import Profile
 from .reporting import log_report
@@ -21,6 +21,8 @@ class ScanOptions:
     max_elapsed_seconds: float = 300.0
     max_records: int = 10000
     timeout: float = 30.0
+    max_response_bytes: int = DEFAULT_RESPONSE_BYTES
+    max_retained_bytes: int = DEFAULT_RETAINED_BYTES
 
 
 @dataclass
@@ -58,6 +60,7 @@ def scan_range(
     attempts = 0
     stop_reasons: list[str] = []
     fatal_code = 0
+    current_losses: dict[str, int] = {}
     width = 900_000_000_000
     if seed is None:
         intervals = [ScanInterval(start, min(start + width, end_ns))
@@ -65,9 +68,17 @@ def scan_range(
         if direction == 'backward':
             intervals.reverse()
     else:
-        intervals = deepcopy(seed.intervals)
+        intervals = [replace(item, reasons=list(item.reasons),
+                             result=replace(item.result, records=list(item.result.records))
+                             if item.result is not None else None) for item in seed.intervals]
         for item in intervals:
             item.sample_from_current_run = False
+    retained_bytes = RetainedBudget(options.max_retained_bytes)
+
+    def interval_bytes(item: ScanInterval) -> int:
+        return sum(canonical_record_size(record) for record in item.result.records) if item.result is not None else 0
+
+    retained_bytes.replace(0, sum(interval_bytes(item) for item in intervals))
     requested: list[tuple[ScanInterval, int]] = []
     previous_requests = deepcopy(seed.report.get('requests', [])) if seed is not None else []
     # Every checkpoint adds this execution to one immutable starting total.
@@ -112,20 +123,22 @@ def scan_range(
              'reasons': list(i.reasons)} for i, before in requested if i.http_attempts > before]
         current = report['usage']['current']
         current.update({'raw_entries': raw_entries, 'skipped_entries': skipped_entries,
-                        'skipped_series': skipped_series, 'retained_records': charged_records()})
+                        'skipped_series': skipped_series, 'retained_records': charged_records(), 'retained_bytes': retained_bytes.used})
         report['usage']['cumulative'] = {
             'http_attempts': baseline_usage.get('http_attempts', 0) + attempts,
             'elapsed_seconds': baseline_usage.get('elapsed_seconds', 0.0) + current['elapsed_seconds'],
             'raw_entries': combined.raw_entries,
             'skipped_entries': combined.skipped.skipped_entries,
             'skipped_series': combined.skipped.skipped_series,
-            'retained_records': len(records),
+            'retained_records': len(records), 'retained_bytes': retained_bytes.used,
         }
         report['status'] = 'failed' if fatal_code else 'incomplete' if report['coverage']['unresolved'] else 'complete'
         report['stop_reasons'] = stop_reasons
+        report['current_losses'] = dict(current_losses)
         report['budgets'] = {'max_http_attempts': options.max_http_attempts,
                              'max_elapsed_seconds': options.max_elapsed_seconds,
-                             'max_records': options.max_records, 'request_timeout_seconds': options.timeout}
+                             'max_records': options.max_records, 'request_timeout_seconds': options.timeout,
+                             'max_response_bytes': options.max_response_bytes, 'max_retained_bytes': options.max_retained_bytes}
         return ScanOutcome(combined, report, fatal_code or (4 if report['coverage']['unresolved'] else 0), intervals)
 
     def checkpoint() -> None:
@@ -177,15 +190,22 @@ def scan_range(
             if capacity <= 0:
                 raise BudgetStopped("record_budget")
             request_limit = min(options.limit, capacity)
+            byte_capacity = options.max_retained_bytes - retained_bytes.used + interval_bytes(interval)
+            if byte_capacity <= 0:
+                raise BudgetStopped("retained_bytes")
             check_budget()
             interval.request_limit = request_limit
             requested.append((interval, interval.http_attempts))
             result = query_range(profile=profile, token=token, query=query,
                                  start_ns=interval.start_ns, end_ns=interval.end_ns,
                                  limit=request_limit, direction=direction,
-                                 timeout=options.timeout, opener=bounded_opener, sleeper=bounded_sleep)
+                                 timeout=options.timeout, opener=bounded_opener, sleeper=bounded_sleep,
+                                 monotonic=monotonic, max_response_bytes=options.max_response_bytes,
+                                 max_retained_bytes=byte_capacity)
         except BudgetStopped as error:
             stop_reasons = [str(error)]
+            if stop_reasons == ["retained_bytes"]:
+                current_losses["retained_bytes"] = current_losses.get("retained_bytes", 0) + 1
             if interval.http_attempts:
                 interval.reasons = list(stop_reasons)
             break
@@ -195,9 +215,19 @@ def scan_range(
             stop_reasons = [reason]
             fatal_code = 3 if isinstance(error, AuthenticationError) else 4
             break
+        except QueryResourceError as error:
+            reason = query_error_reason(error)
+            current_losses[reason] = current_losses.get(reason, 0) + 1
+            interval.reasons = [reason]
+            if interval.reasons == ["retained_bytes"]:
+                stop_reasons = list(interval.reasons)
+                break
         except QueryError as error:
+            if isinstance(error, QueryTimeoutError):
+                current_losses["response_timeout"] = current_losses.get("response_timeout", 0) + 1
             interval.reasons = ["timeout" if isinstance(error, QueryTimeoutError) else "request_failed"]
         else:
+            previous_bytes = interval_bytes(interval)
             previous_result, previous_origin = interval.result, interval.sample_origin
             previous_owner = interval.sample_from_current_run
             interval.result = replace(result, records=[
@@ -217,6 +247,7 @@ def scan_range(
                     and len(previous_result.records) > len(interval.result.records)):
                 interval.result, interval.sample_origin = previous_result, previous_origin
                 interval.sample_from_current_run = previous_owner
+            retained_bytes.replace(previous_bytes, interval_bytes(interval))
             raw_count_exact = raw_count_exact and result.raw_count_exact
             raw_entries += result.raw_entries
             skipped_entries += result.skipped.skipped_entries
@@ -237,6 +268,8 @@ def scan_range(
                     child.reasons = ["unqueried", *interval.reasons]
                 if direction == 'backward':
                     children.reverse()
+                # Request history keeps the parent metadata, not obsolete evidence.
+                interval.result = None
                 intervals[position:position + 1] = children
                 checkpoint()
                 continue

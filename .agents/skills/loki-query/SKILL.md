@@ -59,7 +59,43 @@ Resolve command syntax and type-specific options from CLI help and the
    completeness reports only when they belong to the current query; deduct
    current invocation usage, never a resume's cumulative totals. Complete when
    the invocation is settled and its evidence, coverage, and error are recorded.
-4. Follow evidence within the settled ledger. Empty successful, resolved
+4. Check local evidence before drawing conclusions. Read stderr's `evidence:`
+   JSON status alongside retrieval coverage. `local_evidence=incomplete` means
+   output/parse/resource loss even when retrieval resolved; preserve loss reasons,
+   oversized-record counts and unknown unprocessed tails. The CLI bounds each
+   complete record and combined stdout/stderr by UTF-8 bytes; obtain defaults
+   and finite ranges from command help. A larger finite allowance requires an
+   explicit investigation decision; exhaustion calls for a narrower-query
+   decision within the same authorization and ledger, never automatic requery.
+   HTTP bodies are bounded before JSON decoding, and ordinary log/metric
+   retention charges complete canonical UTF-8 records including labels. Treat
+   `response_bytes`, `retained_bytes` and `response_timeout` as retrieval gaps;
+   an oversized response is rejected whole without recovery retries. Resolve
+   `--max-response-bytes` and `--max-retained-bytes` defaults/ranges from help.
+   Scan retention includes saved baseline records and all active intervals;
+   child replacement releases its prior charge. On retention exhaustion retain
+   earlier evidence and report unresolved intervals without automatic recovery.
+   Read report/checkpoint `evidence` separately from retrieval `coverage`: display
+   loss returns 4 while resolved coverage and full archived records survive.
+   Trace applies these rules to ordinary and scan executions, including its human
+   timeline and candidate/zero-match diagnostics. Every returned candidate stream
+   consumes the shared retained-byte allowance before exact field/path or label
+   matching, including unmatched records. Trace checkpoints retain full candidates
+   and the final presentation evidence; zero matches after a resource loss leave
+   a retrieval gap. Export/resume bound actual archive file bytes before JSON
+   decoding with the effective retained-byte cap, then charge decoded canonical
+   records separately. Archive overflow returns 4 with the original state intact;
+   corrupt state remains configuration failure 2. Offline export needs no config,
+   credentials or HTTP and preserves the archive. Each export/resume computes fresh
+   local presentation evidence while retaining historical retrieval coverage and
+   totals; past display loss never makes a resolved interval eligible for HTTP.
+   A fully resolved resume needs no token or requests. All archive formats share
+   record/output caps; terminal clipping preserves full archived evidence.
+   These byte budgets do not bound exact process RSS.
+   Keep JSONL records whole for downstream redaction. Business-field redaction
+   remains the workspace entrypoint's responsibility; complete CLI records do
+   not establish that free text is safe to expose.
+5. Follow evidence within the settled ledger. Empty successful, resolved
    retrieval means no matches under the selected conditions. Saturation,
    parse loss, unresolved intervals, or errors leave retrieval gaps; stdout
    may still hold valid partial evidence. Trace coverage and record budgets count

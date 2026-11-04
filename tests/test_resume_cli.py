@@ -56,6 +56,44 @@ class ResumeCliTests(unittest.TestCase):
                     now=now or datetime(1970, 1, 1, 0, 30, tzinfo=UTC), sleeper=sleep)
         return code, stdout.getvalue(), stderr.getvalue(), json.loads(report.read_text()) if report.exists() else {}
 
+    def test_resume_retention_counts_saved_baseline_before_new_response(self) -> None:
+        later = [{'stream': {}, 'values': [['900000000001', 'baseline']]}]
+        self.assertEqual(self.invoke('query', [later], '--max-http-attempts', '1')[0], 4)
+        cap = (self.work / 'state.json').stat().st_size
+        earlier = [{'stream': {}, 'values': [['1', 'x' * (cap - 100)]]}]
+        code, output, error, report = self.invoke('resume', [earlier], '--max-retained-bytes', str(cap))
+        self.assertEqual(code, 4, error)
+        self.assertEqual([json.loads(line)['line'] for line in output.splitlines()], ['baseline'])
+        self.assertEqual(report['stop_reasons'], ['retained_bytes'])
+        self.assertEqual(report['usage']['current']['retained_bytes'], report['usage']['cumulative']['retained_bytes'])
+        self.assertEqual(len(self.requests), 2)
+
+    def test_clipped_resolved_archive_resumes_without_token_or_requests(self) -> None:
+        rows = [{'stream': {}, 'values': [['1', 'complete evidence']]}]
+        code, output, error, report = self.invoke('query', [[], rows], '--max-record-bytes', '1')
+        self.assertEqual(code, 4, error)
+        self.assertEqual(report['status'], 'complete')
+        self.assertEqual(report['coverage']['unresolved'], [])
+        before = len(self.requests)
+        code, output, error, report = self.invoke('resume', [], '--max-http-attempts', '1', token='')
+        self.assertEqual(code, 0, error)
+        self.assertIn('complete evidence', output)
+        self.assertEqual(len(self.requests), before)
+        self.assertIn('HTTP attempt accounting: used=0 cap=1', error)
+        self.assertEqual(report['evidence']['local_evidence'], 'complete')
+
+    def test_archive_refusal_precedes_resume_credentials_and_http(self) -> None:
+        self.assertEqual(self.invoke('query', [[]], '--max-http-attempts', '1')[0], 4)
+        state = self.work / 'state.json'
+        original = state.read_bytes()
+        code, output, error, report = self.invoke('resume', [], '--max-retained-bytes', '1',
+                                                 '--max-http-attempts', '2', token='')
+        self.assertEqual((code, output), (4, ''), error)
+        self.assertIn('archive_bytes', error)
+        self.assertIn('HTTP attempt accounting: used=0 cap=2', error)
+        self.assertEqual(state.read_bytes(), original)
+        self.assertEqual(len(self.requests), 1)
+
     def test_second_process_resume_freezes_bounds_skips_complete_and_rotates_token(self) -> None:
         later = [{'stream': {}, 'values': [['900000000001', 'frozen']]}]
         earlier = [{'stream': {}, 'values': [['1', 'retried']]}]

@@ -147,6 +147,40 @@ with status `4`. If every record is malformed, stdout stays empty.
 
 The CLI retries only `429`, `502`, `503`, and `504` responses, at most twice, and honors `Retry-After`. The default request timeout is 30 seconds. Tokens are read only from the environment variable named by the profile and never enter the command line or configuration file.
 
+## Output budgets
+
+Ordinary log/metric queries and ordinary/scanning trace timelines bound all
+human, raw and JSONL output by final
+UTF-8 bytes, including escaping and newlines. `--max-record-bytes` defaults to
+4194304 (4 MiB), range 1–8388608 (8 MiB). `--max-output-bytes` defaults to
+1048576 (1 MiB), range 1–33554432 (32 MiB), shared by stdout and stderr.
+Only positive integers within these limits are accepted, before networking;
+there is no unlimited mode. KiB = 1024 bytes; MiB = 1024 KiB.
+
+Up to 2 KiB of the total is reserved for status and final HTTP accounting.
+Records over the single-record allowance are dropped whole and counted;
+subsequent records may still be displayed. When the next eligible complete
+record cannot fit the remaining total, body output stops in the existing order;
+later smaller records are not sampled. Log fields are never clipped. Every
+emitted JSONL record remains complete JSON. Very small totals may allow only
+`incomplete` status, or no status if even that cannot fit.
+
+The stderr `evidence: {...}` JSON status separates `upstream_retrieval` from
+`local_evidence`, includes effective byte limits, loss reasons/counts, and marks
+an unprocessed tail as `unknown` rather than inventing its record count. Empty
+success still reports status. Local drops, parse loss or output exhaustion return
+`4`; authentication retains `3`. Upstream record-limit saturation alone may
+return `0` with incomplete retrieval and complete local evidence. A log JSON
+report adds `evidence` without changing retrieved coverage; display loss does
+not turn resolved intervals into retrieval gaps. Stdout contains no summary
+records. Explicit HTTP attempt accounting remains exactly once on stderr's
+last line. Errors and diagnostics share the output allowance.
+
+These limits bound evidence delivery, not process RSS or upstream ingestion.
+An evidence gap calls for an explicit narrower-query decision, never automatic
+requery or a broader scope. The generic CLI preserves complete log text;
+workspace-specific business redaction remains the wrapper's responsibility.
+
 ## Log completeness reports
 
 Every ordinary log query writes one coverage/resource summary to stderr. A
@@ -363,6 +397,13 @@ as initial scans; offline export remains available after interruption.
 
 ## Trace timelines
 
+Trace candidate retention is charged before exact matching, across all returned
+streams and selected fields. Unmatched candidates consume the same cumulative
+byte allowance as matches. The independent human timeline and candidate/zero-match
+diagnostics share the output budget with raw/JSONL and stderr. Response or
+retention loss leaves retrieval gaps; display loss preserves retrieved coverage.
+Trace checkpoints retain full candidates and final presentation evidence.
+
 Use an explicitly selected profile, a single stream selector, and an explicit
 relative or absolute time boundary:
 
@@ -531,3 +572,54 @@ in `pyproject.toml`. GitHub Actions runs the unit tests, compilation checks and
 the same strict type check on pushes and pull requests using Python 3.11.
 
 A production smoke test should use a temporary configuration, the last 15 minutes, and `limit=1`. Its report should record only whether the request succeeded and the number of results, without reproducing log content.
+
+## HTTP and retained data budgets
+
+Every query, trace, scan and resume response is read in bounded chunks before
+JSON decoding. `--max-response-bytes` defaults to 32 MiB (33,554,432 bytes),
+with a valid range of 1–67,108,864 bytes (64 MiB). Actual body bytes count;
+missing or inaccurate Content-Length does not bypass the cap. Exactly the cap
+is accepted. An oversized body is closed and rejected without parsing partial
+JSON or adding retries. The existing `--timeout` also bounds body reception
+across continuous slow output, rather than restarting for each read.
+
+`--max-retained-bytes` defaults to 64 MiB (67,108,864 bytes), valid from 1 to
+268,435,456 bytes (256 MiB). Ordinary log and metric queries charge each complete
+record's deterministic compact, sorted-key UTF-8 JSON, including its type,
+nanosecond timestamp, labels and line/value. A response exceeding retention is
+rejected atomically, preserving ordering rather than selecting a wire-order
+prefix. Scans share one current retained-byte allowance across all intervals,
+including saved baseline samples on resume. Splitting transfers ownership;
+accepted child replacements release the old charge. Retention exhaustion stops
+new requests and preserves earlier evidence; response overflow leaves its interval
+unresolved without extra splitting or retries. Usage reports current retained
+bytes, rather than a historical sum. This is a data budget, not an exact process
+RSS limit.
+
+Export and resume read actual archive bytes in bounded chunks before JSON
+parsing, using the effective `--max-retained-bytes` cap. The checksum envelope,
+metadata and whitespace count too; exactly the cap is accepted. Decoded records
+then separately share that same canonical retention cap. Oversized archives
+return 4 with `archive_bytes` or `retained_bytes`; invalid/corrupt state still
+returns 2. Refusal preserves the original archive and performs no HTTP.
+
+Ordinary and trace exports support human, raw and JSONL with the same per-record
+and combined output limits. Each export/resume starts fresh local display loss
+and parse counters while preserving historical retrieval totals and coverage.
+Export needs no credentials or configuration and leaves the archive unchanged.
+Resolved resume needs no token and performs no HTTP, even after earlier display
+loss. Resume shares retention across loaded baseline and new evidence, and saves
+full evidence independently of terminal limits.
+
+Log scans apply the same complete-record and combined stdout/stderr output caps
+as ordinary queries. Display loss returns 4 while resolved retrieval coverage
+stays resolved. Reports and the final checkpoint save separate `evidence` status;
+archives retain all collected records even when terminal output is clipped.
+Historical parse counters remain in retrieval reports; local parse loss describes
+only this execution. Offline export can display the archived evidence again.
+
+Invalid budgets return 2 before HTTP; response/retention overflow and reception
+timeout return 4 with incomplete evidence and unresolved retrieval. Authentication
+failures retain exit 3. Limits and loss reasons are reported on stderr; JSONL
+stdout contains only complete records. No resource error adds automatic retries,
+slicing or a wider query. Choose a narrower query explicitly after exhaustion.

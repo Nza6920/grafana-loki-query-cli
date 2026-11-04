@@ -6,8 +6,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
+from http.client import HTTPException
 import json
 import time
+import socket
+import threading
 from typing import Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -17,7 +20,7 @@ from .config import Profile
 
 
 class ReadableResponse(Protocol):
-    def read(self) -> bytes: ...
+    def read(self, size: int = -1) -> bytes: ...
     def close(self) -> None: ...
 
 
@@ -41,8 +44,29 @@ class QueryTimeoutError(QueryError):
     """Raised when a range request times out."""
 
 
+class QueryResourceError(QueryError):
+    """A response or retained data budget exhausted without retry."""
+
+
+DEFAULT_RESPONSE_BYTES = 32 * 1024 * 1024
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+DEFAULT_RETAINED_BYTES = 64 * 1024 * 1024
+MAX_RETAINED_BYTES = 256 * 1024 * 1024
+
+
 class AuthenticationError(QueryError):
     """Raised when Grafana rejects the configured bearer token."""
+
+
+def query_error_reason(error: QueryError, *, fallback: str = "request_failed") -> str:
+    """Stable report classification shared by query, trace, and scan callers."""
+    if isinstance(error, AuthenticationError):
+        return "authentication_failed"
+    if isinstance(error, HttpAttemptBudgetError):
+        return "http_attempt_budget"
+    if isinstance(error, (QueryResourceError, QueryTimeoutError)):
+        return str(error).split(":", 1)[0]
+    return fallback
 
 
 @dataclass(frozen=True)
@@ -61,6 +85,33 @@ class MetricSample:
 
 QueryType = Literal["log", "metric"]
 Record = LogEntry | MetricSample
+
+
+def canonical_record_size(record: Record) -> int:
+    """Complete deterministic UTF-8 representation, independent of output format."""
+    value: dict[str, object] = {"timestamp_ns": record.timestamp_ns, "labels": record.labels}
+    if isinstance(record, LogEntry):
+        value.update(type="log", line=record.line)
+    else:
+        value.update(type="metric", value=record.value)
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":")).encode("utf-8"))
+
+
+class RetainedBudget:
+    """Current held record bytes; replacements are atomic on failure."""
+
+    def __init__(self, maximum: int = DEFAULT_RETAINED_BYTES) -> None:
+        self.maximum = maximum
+        self.used = 0
+
+    def replace(self, previous: int, next_charge: int) -> None:
+        updated = self.used - previous + next_charge
+        if previous < 0 or previous > self.used or next_charge < 0:
+            raise ValueError("invalid retained byte replacement")
+        if updated > self.maximum:
+            raise QueryResourceError("retained_bytes: incomplete response; retained byte budget exhausted.")
+        self.used = updated
 
 
 @dataclass(frozen=True)
@@ -85,9 +136,50 @@ class QueryResult:
     raw_count_exact: bool = True
 
 
+class _DeadlineResponse:
+    """Real urllib body reception, including chunk framing, has an absolute deadline."""
+
+    def __init__(self, response: Any, remaining: float) -> None:
+        self.response = response
+        self.expired = threading.Event()
+        # Capture the owned socket before HTTPResponse may clear fp at EOF.
+        self.socket = cast(socket.socket, response.fp.raw._sock)
+        self.timer = threading.Timer(max(0.0, remaining), self._expire)
+        self.timer.daemon = True
+        self.timer.start()
+
+    def _expire(self) -> None:
+        self.expired.set()
+        try:
+            self.socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def read(self, size: int = -1) -> bytes:
+        try:
+            chunk = cast(bytes, self.response.read1(size))
+        except (OSError, ValueError, HTTPException) as error:
+            if self.expired.is_set():
+                raise QueryTimeoutError("response_timeout: incomplete response reception.") from error
+            raise QueryError("Grafana response reception failed.") from error
+        if self.expired.is_set():
+            raise QueryTimeoutError("response_timeout: incomplete response reception.")
+        return chunk
+
+    def close(self) -> None:
+        self.timer.cancel()
+        self.timer.join()
+        self.response.close()
+
+
 def default_opener(request: Request, timeout: float) -> ReadableResponse:
+    started = time.monotonic()
     response = urlopen(request, timeout=timeout)  # noqa: S310 - configured endpoint
-    return cast(ReadableResponse, response)
+    try:
+        return _DeadlineResponse(response, timeout - (time.monotonic() - started))
+    except BaseException:
+        response.close()
+        raise
 
 
 def query_endpoint(profile: Profile) -> str:
@@ -111,6 +203,9 @@ def query_range(
     timeout: float,
     opener: Opener = default_opener,
     sleeper: Sleeper = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    max_response_bytes: int = DEFAULT_RESPONSE_BYTES,
+    max_retained_bytes: int = DEFAULT_RETAINED_BYTES,
 ) -> QueryResult:
     endpoint = query_endpoint(profile)
     request_params = {
@@ -137,8 +232,10 @@ def query_range(
             timeout=timeout,
             opener=opener,
             sleeper=sleeper,
+            monotonic=monotonic,
+            max_response_bytes=max_response_bytes,
         )
-        return _result_from_payload(payload, query_type)
+        return _result_from_payload(payload, query_type, max_retained_bytes)
     except QueryError as error:
         error_type = type(error)
         raise error_type(str(error).replace(token, "[REDACTED]")) from error
@@ -150,13 +247,28 @@ def _request_payload(
     timeout: float,
     opener: Opener,
     sleeper: Sleeper,
+    monotonic: Callable[[], float],
+    max_response_bytes: int,
 ) -> dict[str, Any]:
     retryable_statuses = {429, 502, 503, 504}
     for attempt in range(3):
+        deadline = monotonic() + timeout
         try:
             with closing(opener(request, timeout)) as response:
-                return _decode_payload(response.read())
+                body = bytearray()
+                while True:
+                    if monotonic() >= deadline:
+                        raise QueryTimeoutError("response_timeout: incomplete response reception.")
+                    chunk = response.read(min(65536, max_response_bytes - len(body) + 1))
+                    if monotonic() >= deadline:
+                        raise QueryTimeoutError("response_timeout: incomplete response reception.")
+                    if len(body) + len(chunk) > max_response_bytes:
+                        raise QueryResourceError("response_bytes: incomplete response; byte budget exhausted.")
+                    if not chunk:
+                        return _decode_payload(body)
+                    body.extend(chunk)
         except HTTPError as error:
+            error.close()
             if error.code in {401, 403}:
                 raise AuthenticationError(
                     f"Grafana request failed with HTTP {error.code}."
@@ -172,7 +284,8 @@ def _request_payload(
         except (URLError, TimeoutError) as error:
             reason = error.reason if isinstance(error, URLError) else "timed out"
             error_type = QueryTimeoutError if isinstance(error, TimeoutError) or isinstance(reason, TimeoutError) else QueryError
-            raise error_type(f"Grafana request failed: {reason}.") from error
+            message = "response_timeout: incomplete request or response reception." if error_type is QueryTimeoutError else f"Grafana request failed: {reason}."
+            raise error_type(message) from error
     raise AssertionError("retry loop must return or raise")
 
 
@@ -191,10 +304,10 @@ def _retry_delay(retry_after: str | None, attempt: int) -> float:
             return 0.5 * (2.0**attempt)
 
 
-def _decode_payload(body: bytes) -> dict[str, Any]:
+def _decode_payload(body: bytes | bytearray) -> dict[str, Any]:
     try:
         payload = json.loads(body, parse_float=Decimal)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (ValueError, RecursionError) as error:
         raise QueryError("Grafana returned an invalid JSON response.") from error
     if not isinstance(payload, dict):
         raise QueryError("Grafana returned an unexpected JSON response.")
@@ -202,7 +315,7 @@ def _decode_payload(body: bytes) -> dict[str, Any]:
 
 
 def _result_from_payload(
-    payload: dict[str, Any], query_type: QueryType
+    payload: dict[str, Any], query_type: QueryType, max_retained_bytes: int
 ) -> QueryResult:
     if payload.get("status") != "success":
         message = payload.get("message") or payload.get("error") or "unknown API error"
@@ -223,6 +336,12 @@ def _result_from_payload(
             raw_count_exact=False,
         )
 
+    retained = RetainedBudget(max_retained_bytes)
+
+    def retain(records: list[Record], record: Record) -> None:
+        retained.replace(0, canonical_record_size(record))
+        records.append(record)
+
     if query_type == "metric":
         samples: list[Record] = []
         skipped_series = 0
@@ -241,7 +360,7 @@ def _result_from_payload(
                     skipped_samples += 1
                     continue
                 timestamp, value = sample
-                if not isinstance(value, str):
+                if not isinstance(value, str) or not _is_utf8(value):
                     skipped_samples += 1
                     continue
                 try:
@@ -249,18 +368,17 @@ def _result_from_payload(
                 except (ValueError, InvalidOperation):
                     skipped_samples += 1
                     continue
-                samples.append(
+                retain(samples,
                     MetricSample(
                         timestamp_ns=timestamp_ns,
                         labels=labels,
                         value=value,
                     )
                 )
+        samples.sort(key=lambda sample: sample.timestamp_ns, reverse=True)
         return QueryResult(
             query_type="metric",
-            records=sorted(
-                samples, key=lambda sample: sample.timestamp_ns, reverse=True
-            ),
+            records=samples,
             skipped=ParseSummary(
                 skipped_series=skipped_series,
                 skipped_samples=skipped_samples,
@@ -293,7 +411,7 @@ def _result_from_payload(
                 skipped_entries += 1
                 continue
             timestamp, line = entry
-            if not isinstance(line, str):
+            if not isinstance(line, str) or not _is_utf8(line):
                 skipped_entries += 1
                 continue
             try:
@@ -301,16 +419,17 @@ def _result_from_payload(
             except (ValueError, InvalidOperation):
                 skipped_entries += 1
                 continue
-            entries.append(
+            retain(entries,
                 LogEntry(
                     timestamp_ns=timestamp_ns,
                     labels=labels,
                     line=line,
                 )
             )
+    entries.sort(key=lambda entry: entry.timestamp_ns, reverse=True)
     return QueryResult(
         query_type="log",
-        records=sorted(entries, key=lambda entry: entry.timestamp_ns, reverse=True),
+        records=entries,
         raw_entries=raw_entries,
         raw_count_exact=raw_count_exact,
         skipped=ParseSummary(
@@ -349,7 +468,16 @@ def _labels(value: object) -> dict[str, str] | None:
         return None
     if not all(
         isinstance(key, str) and isinstance(item, str)
+        and _is_utf8(key) and _is_utf8(item)
         for key, item in value.items()
     ):
         return None
     return dict(value)
+
+
+def _is_utf8(value: str) -> bool:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True

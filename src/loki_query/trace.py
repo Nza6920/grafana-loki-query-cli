@@ -9,9 +9,9 @@ import re
 from typing import Any, TextIO
 from urllib.request import Request
 
-from .client import AuthenticationError, HttpAttemptBudgetError, LogEntry, Opener, QueryError, QueryResult, ReadableResponse, Sleeper, query_range
+from .client import AuthenticationError, LogEntry, Opener, QueryError, QueryResult, ReadableResponse, Sleeper, query_range, query_error_reason
 from .config import ConfigurationError, load_config
-from .output import format_timestamp_utc, write_result
+from .output import BudgetedStream, format_timestamp_utc, set_retrieval_status, write_record, write_result
 from .persistence import WorkDirectory
 from .scanning import ScanOptions, ScanOutcome, scan_range
 from .reporting import log_report, validate_report_destination, write_log_report
@@ -172,8 +172,8 @@ def write_trace_result(result: QueryResult, output_format: str, stream: TextIO, 
             service = json.dumps(record.labels.get(service_field) or 'unknown', ensure_ascii=False)
             namespace = json.dumps(record.labels.get('namespace') or 'unknown', ensure_ascii=False)
             labels = json.dumps(record.labels, ensure_ascii=False, separators=(',', ':'))
-            print(f'{format_timestamp_utc(record.timestamp_ns)} service={service} namespace={namespace} '
-                  f'{labels} {record.line}', file=stream)
+            write_record(f'{format_timestamp_utc(record.timestamp_ns)} service={service} namespace={namespace} '
+                         f'{labels} {record.line}\n', stream)
 
 def trace_metadata(trace_id: str, source: str, selector: str, fields: list[str], paths: list[str],
                    mapping: tuple[tuple[str, ...], ...]) -> dict[str, Any]:
@@ -207,6 +207,13 @@ def write_trace_outcome(outcome: ScanOutcome, args: argparse.Namespace, stdout: 
 def _write_trace_presentation(result: QueryResult, matches: QueryResult, report: dict[str, Any],
                               args: argparse.Namespace, stdout: TextIO, stderr: TextIO,
                               *, token: str, exit_code: int) -> int:
+    current = report['usage']['current']
+    parse_loss = (bool(current['skipped_entries'] or current['skipped_series'])
+                  if 'skipped_entries' in current else result.skipped.incomplete)
+    set_retrieval_status(stderr, report['status'], parse_loss=parse_loss)
+    if isinstance(stderr, BudgetedStream):
+        for reason, count in report.get('current_losses', {}).items():
+            stderr.budget.mark_loss(reason, count)
     write_trace_result(matches, args.output, stdout, service_field=args.service_field)
     print('Trace timeline: equal timestamps do not imply causality.', file=stderr)
     print(f'Trace candidates: {len(result.records)} examined, {len(matches.records)} matched.', file=stderr)
@@ -307,7 +314,8 @@ def run_trace(
                 direction=args.direction, options=ScanOptions(limit=args.limit,
                     max_http_attempts=args.max_http_attempts or 60,
                     max_elapsed_seconds=args.max_elapsed_seconds or 300.0,
-                    max_records=args.max_records or 10000, timeout=args.timeout),
+                    max_records=args.max_records or 10000, timeout=args.timeout,
+                    max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes),
                 opener=opener, sleeper=sleeper, monotonic=monotonic, progress=progress)
             return annotate_trace(outcome, metadata)
         if args.work_dir is not None:
@@ -315,6 +323,9 @@ def run_trace(
                 work.validate_report(args.report)
                 work.require_new()
                 outcome = execute_scan(work)
+                code = write_trace_outcome(outcome, args, stdout, stderr, token=token)
+                work.save(outcome, identity=identity)
+                return code
         else:
             outcome = execute_scan()
         return write_trace_outcome(outcome, args, stdout, stderr, token=token)
@@ -329,7 +340,8 @@ def run_trace(
         report = log_report(profile=profile, query=query, start_ns=start_ns, end_ns=end_ns,
                             direction=args.direction, limit=args.limit, result=result, attempts=attempts,
                             elapsed_seconds=max(0.0, monotonic() - started), timeout=args.timeout,
-                            failure_reason=reason, max_http_attempts=min(3, args.max_http_attempts or 3))
+                            failure_reason=reason, max_http_attempts=min(3, args.max_http_attempts or 3),
+                            max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes)
         report['trace'] = metadata
         report['counts']['matched_records'] = len(matches.records) if matches else 0
         report['counts']['filtered_candidates'] = len(result.records) - len(matches.records) if result and matches else 0
@@ -338,9 +350,10 @@ def run_trace(
     try:
         result = query_range(profile=profile, token=token, query=query, start_ns=start_ns,
                              end_ns=end_ns, limit=args.limit, direction=args.direction, timeout=args.timeout,
-                             opener=counted_opener, sleeper=sleeper)
+                             opener=counted_opener, sleeper=sleeper, monotonic=monotonic,
+                             max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes)
     except QueryError as error:
-        report = report_for(None, None, 'authentication_failed' if isinstance(error, AuthenticationError) else 'http_attempt_budget' if isinstance(error, HttpAttemptBudgetError) else 'request_failed')
+        report = report_for(None, None, query_error_reason(error))
         write_log_report(report, args.report, stderr, token=token)
         raise
     matches = (matched_labels(result, args.trace_id, label_fields) if args.source == 'label'

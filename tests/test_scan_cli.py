@@ -52,6 +52,104 @@ class ScanCliTests(unittest.TestCase):
     def read_report(self) -> Any:
         return json.loads(self.report.read_text())
 
+    def test_shared_retained_bytes_keep_first_response_without_retry_or_split(self) -> None:
+        first = [{'stream': {'app': 'api'}, 'values': [['1800000000001', 'first']]}]
+        second = [{'stream': {'app': 'api'}, 'values': [['900000000001', 'second']]}]
+        self.assertEqual(self.invoke([first, second, []], '--max-retained-bytes', '150'), 4)
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual([json.loads(line)['line'] for line in self.stdout.getvalue().splitlines()], ['first'])
+        report = self.read_report()
+        self.assertEqual(report['stop_reasons'], ['retained_bytes'])
+        self.assertEqual(len(report['coverage']['resolved']), 1)
+        self.assertTrue(all('retained_bytes' in gap['reasons'] for gap in report['coverage']['unresolved']))
+
+    def test_exact_retained_capacity_stops_next_interval_with_local_loss(self) -> None:
+        first = [{'stream': {}, 'values': [['900000000001', 'okay']]}]
+        self.assertEqual(self.invoke([first], '--end', '1970-01-01T00:30:00Z',
+                                     '--max-retained-bytes', '68', '--max-http-attempts', '2'), 4)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual([json.loads(line)['line'] for line in self.stdout.getvalue().splitlines()], ['okay'])
+        report = self.read_report()
+        self.assertEqual(report['stop_reasons'], ['retained_bytes'])
+        self.assertEqual(report['evidence']['local_evidence'], 'incomplete')
+        self.assertEqual(report['evidence']['losses'], {'retained_bytes': 1})
+        self.assertIn('"local_evidence":"incomplete"', self.stderr.getvalue())
+        self.assertIn('"retained_bytes":1', self.stderr.getvalue())
+
+    def test_display_loss_keeps_resolved_coverage_and_full_checkpoint(self) -> None:
+        work = self.config.parent / 'archive'
+        records = [{'stream': {}, 'values': [['1', 'x' * 900], ['2', 'small']]}]
+        self.assertEqual(self.invoke([records], '--end', '1970-01-01T00:00:01Z',
+            '--work-dir', str(work), '--max-record-bytes', '200'), 4)
+        self.assertEqual([json.loads(line)['line'] for line in self.stdout.getvalue().splitlines()], ['small'])
+        report = self.read_report()
+        self.assertEqual(report['status'], 'complete')
+        self.assertEqual(report['coverage']['unresolved'], [])
+        self.assertEqual(report['evidence']['losses'], {'record_too_large': 1})
+        saved = json.loads((work / 'state.json').read_text())
+        self.assertIn('record_too_large', json.dumps(saved))
+        self.stdout.seek(0)
+        self.stdout.truncate()
+        self.assertEqual(main(['export', '--work-dir', str(work), '--output', 'jsonl'],
+            environ={}, stdout=self.stdout, stderr=self.stderr,
+            opener=lambda request, timeout: self.fail('offline export must not query')), 0)
+        self.assertEqual(len(self.stdout.getvalue().splitlines()), 2)
+
+    def test_parent_replacement_releases_bytes_and_partition_keeps_duplicates(self) -> None:
+        parent = [{'stream': {}, 'values': [['1', 'same'], ['1', 'same'],
+            ['2500000000', 'stale'], ['3500000000', 'stale']]}]
+        newer = [{'stream': {}, 'values': [['3000000000', 'fresh']]}]
+        older = [{'stream': {}, 'values': [['1', 'same'], ['1', 'same'], ['2', 'extra']]}]
+        self.assertEqual(self.invoke([parent, newer, older], '--limit', '4',
+            '--max-retained-bytes', '300', '--end', '1970-01-01T00:00:04Z'), 0, self.stderr.getvalue())
+        self.assertEqual([json.loads(line)['line'] for line in self.stdout.getvalue().splitlines()],
+            ['fresh', 'extra', 'same', 'same'])
+        self.assertEqual(len(self.requests), 3)
+        self.assertLessEqual(self.read_report()['usage']['current']['retained_bytes'], 300)
+
+    def test_later_response_byte_failure_preserves_earlier_evidence_and_continues(self) -> None:
+        first = [{'stream': {}, 'values': [['1800000000001', 'evidence']]}]
+        oversized = [{'stream': {}, 'values': [['900000000001', 'x' * 500]]}]
+        self.assertEqual(self.invoke([first, oversized, []], '--max-response-bytes', '300'), 4)
+        self.assertEqual([json.loads(line)['line'] for line in self.stdout.getvalue().splitlines()], ['evidence'])
+        self.assertEqual(len(self.requests), 3)
+        self.assertEqual(self.read_report()['coverage']['unresolved'][0]['reasons'], ['response_bytes'])
+        self.assertEqual(len(self.read_report()['coverage']['resolved']), 2)
+
+    def test_output_total_cap_applies_to_each_scan_format_without_losing_archive(self) -> None:
+        for output in ('human', 'raw', 'jsonl'):
+            with self.subTest(output=output):
+                self.stdout.seek(0)
+                self.stdout.truncate()
+                self.stderr.seek(0)
+                self.stderr.truncate()
+                rows = [{'stream': {}, 'values': [['1', 'a' * 600], ['2', 'b' * 600]]}]
+                self.assertEqual(self.invoke([rows], '--end', '1970-01-01T00:00:01Z',
+                    '--output', output, '--max-output-bytes', '3000', '--max-http-attempts', '1'), 4)
+                self.assertLessEqual(len((self.stdout.getvalue() + self.stderr.getvalue()).encode()), 3000)
+                self.assertEqual(self.stdout.getvalue().count('a' * 600), 0)
+                self.assertEqual(self.stdout.getvalue().count('b' * 600), 1)
+                report = self.read_report()
+                self.assertEqual(report['status'], 'complete')
+                self.assertEqual(report['counts']['valid_records'], 2)
+                self.assertEqual(report['evidence']['losses'], {'output_budget': 1})
+                self.assertTrue(self.stderr.getvalue().endswith('HTTP attempt accounting: used=1 cap=1\n'))
+
+    def test_recovered_timeout_keeps_current_local_loss_after_coverage_resolves(self) -> None:
+        work = self.config.parent / 'recovered'
+        self.assertEqual(self.invoke([TimeoutError(), [], []],
+            '--work-dir', str(work), '--end', '1970-01-01T00:00:02Z'), 4)
+        report = self.read_report()
+        self.assertEqual(report['status'], 'complete')
+        self.assertEqual(report['coverage']['unresolved'], [])
+        self.assertEqual(report['evidence']['losses'], {'response_timeout': 1})
+        self.assertEqual(report['evidence']['local_evidence'], 'incomplete')
+        self.assertEqual(main(['--config', str(self.config), 'resume', '--profile', 'test',
+            '--work-dir', str(work), '--report', str(self.report)], environ={},
+            stdout=self.stdout, stderr=self.stderr,
+            opener=lambda request, timeout: self.fail('resolved coverage must not query')), 0)
+        self.assertEqual(self.read_report()['current_losses'], {})
+
     def test_scan_partitions_exact_half_open_intervals_and_freezes_query(self) -> None:
         self.assertEqual(self.invoke([[], [], []]), 0, self.stderr.getvalue())
         self.assertEqual([(r['start'][0], r['end'][0]) for r in self.requests],
@@ -61,7 +159,8 @@ class ScanCliTests(unittest.TestCase):
         report = self.read_report()
         self.assertEqual(report['status'], 'complete')
         self.assertEqual(report['budgets'], {'max_http_attempts': 60, 'max_elapsed_seconds': 300.0,
-                                           'max_records': 10000, 'request_timeout_seconds': 30.0})
+                                           'max_records': 10000, 'request_timeout_seconds': 30.0,
+                                           'max_response_bytes': 33554432, 'max_retained_bytes': 67108864})
         self.assertEqual(len(report['coverage']['resolved']), 3)
 
     def test_forward_scan_preserves_duplicate_records_and_global_descending_output(self) -> None:
@@ -127,7 +226,7 @@ class ScanCliTests(unittest.TestCase):
         self.assertEqual(self.invoke([error, error, error, [], []]), 4)
         self.assertEqual(self.sleeps, [1.0, 1.0])
         self.assertEqual(self.read_report()['usage']['current'], {'http_attempts': 5, 'elapsed_seconds': 2.0,
-            'raw_entries': 0, 'skipped_entries': 0, 'skipped_series': 0, 'retained_records': 0})
+            'raw_entries': 0, 'skipped_entries': 0, 'skipped_series': 0, 'retained_records': 0, 'retained_bytes': 0})
         self.assertEqual(len(self.read_report()['coverage']['resolved']), 2)
 
     def test_fatal_http_failures_stop_immediately_and_keep_prior_evidence(self) -> None:
@@ -171,7 +270,7 @@ class ScanCliTests(unittest.TestCase):
         self.assertEqual(self.requests[0], self.requests[1])
         self.assertEqual(self.sleeps, [0.25])
         self.assertEqual(self.read_report()['usage']['current'], {'http_attempts': 4, 'elapsed_seconds': 0.25,
-            'raw_entries': 0, 'skipped_entries': 0, 'skipped_series': 0, 'retained_records': 0})
+            'raw_entries': 0, 'skipped_entries': 0, 'skipped_series': 0, 'retained_records': 0, 'retained_bytes': 0})
 
     def test_relative_range_is_frozen_at_supplied_reference_time(self) -> None:
         requests: list[dict[str, list[str]]] = []
@@ -251,7 +350,7 @@ class ScanCliTests(unittest.TestCase):
     def test_parse_lost_child_retains_stronger_parent_sample_for_its_range(self) -> None:
         parent = [{'stream': {}, 'values': [['1', 'old'], ['2500000000', 'middle'], ['3500000000', 'new']]}]
         child = [{'stream': {}, 'values': [['bad', 'lost']]}]
-        self.assertEqual(self.invoke([parent, child], '--limit', '3', '--max-http-attempts', '2',
+        self.assertEqual(self.invoke([parent, child], '--limit', '3', '--max-http-attempts', '2', '--max-retained-bytes', '250',
             '--end', '1970-01-01T00:00:04Z'), 4)
         self.assertEqual([json.loads(line)['line'] for line in self.stdout.getvalue().splitlines()],
             ['new', 'middle', 'old'])
@@ -294,7 +393,7 @@ class ScanCliTests(unittest.TestCase):
     def test_raw_saturation_splits_even_when_parse_loss_hides_valid_count(self) -> None:
         parent = [{'stream': {}, 'values': [['1', 'partial'], ['bad', 'lost']]}]
         self.assertEqual(self.invoke([parent, [], []], '--limit', '2',
-            '--end', '1970-01-01T00:00:04Z'), 0, self.stderr.getvalue())
+            '--end', '1970-01-01T00:00:04Z'), 4, self.stderr.getvalue())
         self.assertEqual(len(self.requests), 3)
         self.assertEqual(self.stdout.getvalue(), '')
         report = self.read_report()
