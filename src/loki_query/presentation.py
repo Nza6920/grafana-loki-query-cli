@@ -11,20 +11,18 @@ from typing import Any, TextIO
 
 from .client import QueryResult
 from .output import BudgetedStream, set_retrieval_status, write_result
-from .reporting import write_log_report
+from .reporting import write_log_diagnostics, write_log_report
 
 
-def present_logs(
-    result: QueryResult | None, report: dict[str, Any], output_format: str,
-    stdout: TextIO, stderr: TextIO, *, destination: str | None = None, token: str = '',
+def _prepare_report(
+    result: QueryResult | None, report: dict[str, Any], stderr: TextIO, *, offline: bool,
 ) -> dict[str, Any]:
-    """Render logs and return a detached report carrying this output's evidence.
-
-    ``None`` is a failed retrieval: emit its diagnostics and report without an
-    empty-result message. Streams reuse the command's existing output budget.
-    Exceptions propagate so command-level accounting and finalization still run.
-    """
     presented = deepcopy(report)
+    if offline:
+        presented['current_losses'] = {}
+        presented['usage']['current'] = {**presented['usage']['current'],
+                                          'skipped_entries': 0, 'skipped_series': 0}
+        presented.pop('evidence', None)
     current = presented['usage']['current']
     parse_loss = (bool(current.get('skipped_entries') or current.get('skipped_series'))
                   if 'skipped_entries' in current or 'skipped_series' in current
@@ -33,16 +31,39 @@ def present_logs(
     if isinstance(stderr, BudgetedStream):
         for reason, count in presented.get('current_losses', {}).items():
             stderr.budget.mark_loss(reason, count)
+    return presented
+
+
+def _finish_report(report: dict[str, Any], destination: str | None, stderr: TextIO, *, token: str) -> None:
+    write_log_diagnostics(report, stderr)
+    if isinstance(stderr, BudgetedStream):
+        report['evidence'] = stderr.budget.evidence_status()
+    write_log_report(report, destination, token=token)
+
+
+def present_logs(
+    result: QueryResult | None, report: dict[str, Any], output_format: str,
+    stdout: TextIO, stderr: TextIO, *, destination: str | None = None, token: str = '',
+    offline: bool = False,
+) -> dict[str, Any]:
+    """Render logs and return a detached report carrying this output's evidence.
+
+    ``None`` is a failed retrieval: emit its diagnostics and report without an
+    empty-result message. Streams reuse the command's existing output budget.
+    Offline output resets historical presentation losses while keeping retrieval
+    coverage and counts. Exceptions propagate for command-level finalization.
+    """
+    presented = _prepare_report(result, report, stderr, offline=offline)
     if result is not None:
         write_result(result, output_format, stdout)
-    write_log_report(presented, destination, stderr, token=token)
+    _finish_report(presented, destination, stderr, token=token)
     return presented
 
 
 def present_trace(
     result: QueryResult, matches: QueryResult, report: dict[str, Any], output_format: str,
     stdout: TextIO, stderr: TextIO, *, service_field: str,
-    destination: str | None = None, token: str = '',
+    destination: str | None = None, token: str = '', offline: bool = False,
 ) -> dict[str, Any]:
     """Present trace matches selected by the trace module, preserving candidates.
 
@@ -51,18 +72,11 @@ def present_trace(
     """
     from .trace import write_trace_result
 
-    presented = deepcopy(report)
-    current = presented['usage']['current']
-    parse_loss = (bool(current['skipped_entries'] or current['skipped_series'])
-                  if 'skipped_entries' in current else result.skipped.incomplete)
-    set_retrieval_status(stderr, presented['status'], parse_loss=parse_loss)
-    if isinstance(stderr, BudgetedStream):
-        for reason, count in presented.get('current_losses', {}).items():
-            stderr.budget.mark_loss(reason, count)
+    presented = _prepare_report(result, report, stderr, offline=offline)
     write_trace_result(matches, output_format, stdout, service_field=service_field)
     print('Trace timeline: equal timestamps do not imply causality.', file=stderr)
     print(f'Trace candidates: {len(result.records)} examined, {len(matches.records)} matched.', file=stderr)
     if not matches.records:
         print(f"No trace matches under the selected conditions; candidate retrieval is {presented['status']}.", file=stderr)
-    write_log_report(presented, destination, stderr, token=token)
+    _finish_report(presented, destination, stderr, token=token)
     return presented

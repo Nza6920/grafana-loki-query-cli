@@ -82,6 +82,26 @@ class ResumeCliTests(unittest.TestCase):
         self.assertIn('HTTP attempt accounting: used=0 cap=1', error)
         self.assertEqual(report['evidence']['local_evidence'], 'complete')
 
+    def test_resolved_resume_saves_new_output_evidence_without_trimming_retrieval_records(self) -> None:
+        rows = [{'stream': {}, 'values': [['1', 'complete evidence']]}]
+        self.assertEqual(self.invoke('query', [[], rows])[0], 0)
+        state = self.work / 'state.json'
+        for flags, loss in ((('--max-record-bytes', '1'), 'record_too_large'),
+                            (('--max-output-bytes', '512'), 'output_budget')):
+            with self.subTest(loss=loss):
+                code, output, error, report = self.invoke('resume', [], *flags, token='')
+                self.assertEqual(code, 4, error)
+                self.assertEqual(output, '')
+                self.assertEqual(report['status'], 'complete')
+                self.assertIn(loss, report['evidence']['losses'])
+                saved = json.loads(state.read_text())['payload']
+                self.assertEqual(saved['report']['evidence'], report['evidence'])
+                code, output, error, report = self.invoke('export', [], token='')
+                self.assertEqual(code, 0, error)
+                self.assertEqual(json.loads(output)['line'], 'complete evidence')
+                self.assertEqual(report['evidence']['local_evidence'], 'complete')
+        self.assertEqual(len(self.requests), 2)
+
     def test_archive_refusal_precedes_resume_credentials_and_http(self) -> None:
         self.assertEqual(self.invoke('query', [[]], '--max-http-attempts', '1')[0], 4)
         state = self.work / 'state.json'

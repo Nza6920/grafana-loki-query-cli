@@ -67,10 +67,47 @@ class TraceScanCliTests(unittest.TestCase):
                 self.assertIn('完整证据', output)
                 self.assertEqual(report['evidence']['local_evidence'], 'complete')
                 self.assertEqual(state.read_bytes(), original)
+        for flags, loss in ((('--max-record-bytes', '1'), 'record_too_large'),
+                            (('--max-output-bytes', '512'), 'output_budget')):
+            with self.subTest(resume_loss=loss):
+                code, output, error, report = self.invoke('resume', [], '--work-dir', str(self.work),
+                                                         *flags, token=False)
+                self.assertEqual((code, output), (4, ''), error)
+                self.assertEqual(report['status'], 'complete')
+                self.assertIn(loss, report['evidence']['losses'])
+                saved = json.loads(state.read_text())['payload']
+                self.assertEqual(saved['report']['evidence'], report['evidence'])
+                code, output, error, report = self.invoke('export', [], '--work-dir', str(self.work), token=False)
+                self.assertEqual(code, 0, error)
+                self.assertIn('完整证据', output)
         code, output, error, report = self.invoke('resume', [], '--work-dir', str(self.work), token=False)
         self.assertEqual(code, 0, error)
         self.assertEqual(len(self.requests), 1)
         self.assertEqual(report['usage']['current']['http_attempts'], 0)
+
+    def test_historical_parse_loss_remains_retrieval_history_on_export_and_resume(self) -> None:
+        rows = [{'stream': {'app': 'api'}, 'values': [
+            ['1', '{"trace_id":"abc"}'], ['bad', 'lost']]}]
+        code, _, error, report = self.invoke('trace', [rows], '--scan', '--work-dir', str(self.work),
+                                            '--max-http-attempts', '1')
+        self.assertEqual(code, 4, error)
+        self.assertEqual(report['evidence']['losses'], {'parse_loss': 1})
+        state = self.work / 'state.json'
+        original = state.read_bytes()
+        code, output, error, report = self.invoke('export', [], '--work-dir', str(self.work), token=False)
+        self.assertEqual(code, 4, error)
+        self.assertEqual(report['status'], 'incomplete')
+        self.assertEqual(report['counts']['skipped_entries'], 1)
+        self.assertEqual(report['evidence']['local_evidence'], 'complete')
+        self.assertEqual(state.read_bytes(), original)
+        code, output, error, report = self.invoke('resume', [rows], '--work-dir', str(self.work),
+                                                '--max-http-attempts', '1')
+        self.assertEqual(code, 4, error)
+        self.assertEqual(report['evidence']['losses'], {'parse_loss': 1})
+        saved = json.loads(state.read_text())['payload']
+        self.assertEqual(saved['report']['evidence'], report['evidence'])
+        self.assertEqual(saved['report']['counts']['valid_records'], 1)
+        self.assertIn('abc', output)
 
     def test_trace_scan_saves_candidates_and_resumes_only_unresolved_child(self) -> None:
         line = '{"trace_id":"abc"}'
