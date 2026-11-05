@@ -6,6 +6,7 @@ callers decide whether to save the returned report in an investigation.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
 from typing import Any, TextIO
 
@@ -44,7 +45,7 @@ def _finish_report(report: dict[str, Any], destination: str | None, stderr: Text
 def present_logs(
     result: QueryResult | None, report: dict[str, Any], output_format: str,
     stdout: TextIO, stderr: TextIO, *, destination: str | None = None, token: str = '',
-    offline: bool = False,
+    offline: bool = False, elapsed_seconds: Callable[[], float] | None = None,
 ) -> dict[str, Any]:
     """Render logs and return a detached report carrying this output's evidence.
 
@@ -52,10 +53,16 @@ def present_logs(
     empty-result message. Streams reuse the command's existing output budget.
     Offline output resets historical presentation losses while keeping retrieval
     coverage and counts. Exceptions propagate for command-level finalization.
+    Ordinary queries can sample elapsed time after rendering, before diagnostics;
+    this updates only the detached report, leaving the input and its usage intact.
     """
     presented = _prepare_report(result, report, stderr, offline=offline)
     if result is not None:
         write_result(result, output_format, stdout)
+    if elapsed_seconds is not None:
+        elapsed = elapsed_seconds()
+        presented['usage']['current']['elapsed_seconds'] = elapsed
+        presented['usage']['cumulative']['elapsed_seconds'] = elapsed
     _finish_report(presented, destination, stderr, token=token)
     return presented
 
