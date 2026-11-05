@@ -125,3 +125,39 @@ class OutputBudgetCliTests(unittest.TestCase):
         self.assertEqual(self.invoke(['ok'], '--max-record-bytes', '8388608',
                                      '--max-output-bytes', '33554432', '--output', 'raw'), 0)
         self.assertEqual(self.stdout.getvalue(), 'ok\n')
+
+    def test_output_failure_before_report_preserves_exception_and_command_finalization(self) -> None:
+        for failure in (BrokenPipeError('closed output'), KeyboardInterrupt(), SystemExit(7)):
+            with self.subTest(failure=type(failure).__name__):
+                class FailedOutput(StringIO):
+                    def write(self, text: str, /) -> int:
+                        raise failure
+
+                self.stdout, self.stderr = FailedOutput(), StringIO()
+                report = self.config.parent / 'report.json'
+                with self.assertRaises(type(failure)) as raised:
+                    self.invoke(['ok'], '--output', 'raw', '--report', str(report),
+                                '--max-http-attempts', '1')
+                self.assertIs(raised.exception, failure)
+                self.assertFalse(report.exists())
+                self.assertIn('"execution_interrupted":1', self.stderr.getvalue())
+                self.assertEqual(self.stderr.getvalue().splitlines()[-1],
+                                 'HTTP attempt accounting: used=1 cap=1')
+
+    def test_retrieval_interrupt_propagates_and_still_accounts_for_request(self) -> None:
+        failure = KeyboardInterrupt()
+        report = self.config.parent / 'report.json'
+
+        def opener(request: Request, timeout: float) -> BytesIO:
+            raise failure
+
+        with self.assertRaises(KeyboardInterrupt) as raised:
+            main(['--config', str(self.config), 'query', '--profile', 'test',
+                  '--report', str(report), '--max-http-attempts', '1', '{}'],
+                 environ={'TEST_TOKEN': 'secret'}, stdout=self.stdout, stderr=self.stderr,
+                 opener=opener)
+        self.assertIs(raised.exception, failure)
+        self.assertFalse(report.exists())
+        self.assertIn('"execution_interrupted":1', self.stderr.getvalue())
+        self.assertEqual(self.stderr.getvalue().splitlines()[-1],
+                         'HTTP attempt accounting: used=1 cap=1')

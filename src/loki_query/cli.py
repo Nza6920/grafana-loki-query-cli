@@ -29,6 +29,7 @@ from .persistence import WorkDirectory
 from .output import (write_result, BudgetedStream, OutputBudget, set_retrieval_status,
                      DEFAULT_RECORD_BYTES, MAX_RECORD_BYTES, DEFAULT_OUTPUT_BYTES, MAX_OUTPUT_BYTES)
 from .reporting import log_report, validate_report_destination, write_log_report
+from .presentation import present_logs
 from .scanning import ScanOptions, ScanOutcome, scan_range
 from .time_range import TimeRangeError, resolve_time_range
 from .trace import (annotate_trace, configure_trace_parser, run_trace,
@@ -593,11 +594,9 @@ def _dispatch(
                     max_http_attempts=min(3, args.max_http_attempts or 3),
                     max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes,
                 )
-                write_log_report(report, args.report, error_stream, token=token)
+                present_logs(None, report, args.output, output_stream, error_stream,
+                             destination=args.report, token=token)
             raise
-        set_retrieval_status(error_stream, "incomplete" if result.skipped.incomplete else "complete",
-                             parse_loss=result.skipped.incomplete)
-        write_result(result, args.output, output_stream)
         if args.query_type == "log":
             report = log_report(
                 profile=profile, query=query.strip(), start_ns=start_ns, end_ns=end_ns,
@@ -606,7 +605,12 @@ def _dispatch(
                 max_http_attempts=min(3, args.max_http_attempts or 3),
                     max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes,
             )
-            write_log_report(report, args.report, error_stream, token=token)
+            present_logs(result, report, args.output, output_stream, error_stream,
+                         destination=args.report, token=token)
+        else:
+            set_retrieval_status(error_stream, "incomplete" if result.skipped.incomplete else "complete",
+                                 parse_loss=result.skipped.incomplete)
+            write_result(result, args.output, output_stream)
         if result.skipped.incomplete:
             if args.query_type == "log":
                 return EXIT_QUERY
