@@ -22,8 +22,8 @@ class TraceBudgetCliTests(unittest.TestCase):
         self.out, self.err = StringIO(), StringIO()
         self.attempts = 0
 
-    def invoke(self, candidates: list[dict[str, Any]], *flags: str) -> int:
-        self.out, self.err = StringIO(), StringIO()
+    def invoke(self, candidates: list[dict[str, Any]], *flags: str, stdout: StringIO | None = None) -> int:
+        self.out, self.err = stdout if stdout is not None else StringIO(), StringIO()
         def opener(request: Request, timeout: float) -> BytesIO:
             self.attempts += 1
             return BytesIO(json.dumps({'status': 'success', 'data': {
@@ -64,6 +64,41 @@ class TraceBudgetCliTests(unittest.TestCase):
         self.assertEqual(state['report']['counts']['valid_records'], 2)
         self.assertEqual(state['report']['evidence'], saved_report['evidence'])
         self.assertEqual(state['report']['evidence']['losses'], {'record_too_large': 1})
+
+    def test_output_failure_preserves_trace_checkpoint_and_command_finalization(self) -> None:
+        candidates = [{'stream': {}, 'values': [['1', '{"trace_id":"abc"}'],
+                                               ['2', '{"trace_id":"other"}']]}]
+        for scan in (False, True):
+            for index, failure in enumerate((BrokenPipeError('closed output'), KeyboardInterrupt(), SystemExit(7))):
+                with self.subTest(scan=scan, failure=type(failure).__name__):
+                    class FailedOutput(StringIO):
+                        def write(self, text: str, /) -> int:
+                            raise failure
+
+                    report = self.root / f'report-{scan}-{index}.json'
+                    work = self.root / f'work-{index}'
+                    flags = ['--scan', '--work-dir', str(work)] if scan else []
+                    if scan and isinstance(failure, OSError):
+                        # The existing writer context translates OSError during
+                        # presentation into a work-directory configuration error.
+                        self.assertEqual(self.invoke(candidates, *flags, '--report', str(report),
+                            '--max-http-attempts', '1', stdout=FailedOutput()), 2)
+                        self.assertIn('Cannot access or publish', self.err.getvalue())
+                    else:
+                        with self.assertRaises(type(failure)) as raised:
+                            self.invoke(candidates, *flags, '--report', str(report),
+                                        '--max-http-attempts', '1', stdout=FailedOutput())
+                        self.assertIs(raised.exception, failure)
+                        self.assertIn('"execution_interrupted":1', self.err.getvalue())
+                    self.assertFalse(report.exists())
+                    self.assertEqual(self.err.getvalue().splitlines()[-1],
+                                     'HTTP attempt accounting: used=1 cap=1')
+                    if scan:
+                        state = json.loads((work / 'state.json').read_text())['payload']
+                        self.assertEqual(state['report']['status'], 'complete')
+                        self.assertEqual(state['report']['counts']['valid_records'], 2)
+                        self.assertEqual(state['report']['trace']['id'], 'abc')
+                        self.assertNotIn('evidence', state['report'])
 
     def test_unmatched_candidates_across_streams_share_retained_budget(self) -> None:
         candidates = [{'stream': {'app': str(index)}, 'values': [

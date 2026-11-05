@@ -37,3 +37,32 @@ def present_logs(
         write_result(result, output_format, stdout)
     write_log_report(presented, destination, stderr, token=token)
     return presented
+
+
+def present_trace(
+    result: QueryResult, matches: QueryResult, report: dict[str, Any], output_format: str,
+    stdout: TextIO, stderr: TextIO, *, service_field: str,
+    destination: str | None = None, token: str = '',
+) -> dict[str, Any]:
+    """Present trace matches selected by the trace module, preserving candidates.
+
+    The trace module owns exact matching and its renderer. Import the renderer
+    when presenting so its command orchestration can use this interface too.
+    """
+    from .trace import write_trace_result
+
+    presented = deepcopy(report)
+    current = presented['usage']['current']
+    parse_loss = (bool(current['skipped_entries'] or current['skipped_series'])
+                  if 'skipped_entries' in current else result.skipped.incomplete)
+    set_retrieval_status(stderr, presented['status'], parse_loss=parse_loss)
+    if isinstance(stderr, BudgetedStream):
+        for reason, count in presented.get('current_losses', {}).items():
+            stderr.budget.mark_loss(reason, count)
+    write_trace_result(matches, output_format, stdout, service_field=service_field)
+    print('Trace timeline: equal timestamps do not imply causality.', file=stderr)
+    print(f'Trace candidates: {len(result.records)} examined, {len(matches.records)} matched.', file=stderr)
+    if not matches.records:
+        print(f"No trace matches under the selected conditions; candidate retrieval is {presented['status']}.", file=stderr)
+    write_log_report(presented, destination, stderr, token=token)
+    return presented
