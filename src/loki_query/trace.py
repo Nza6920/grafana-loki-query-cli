@@ -13,6 +13,7 @@ from .client import AuthenticationError, LogEntry, Opener, QueryError, QueryResu
 from .config import ConfigurationError, load_config
 from .output import BudgetedStream, format_timestamp_utc, set_retrieval_status, write_record, write_result
 from .persistence import WorkDirectory
+from .presentation import present_logs, present_trace
 from .scanning import ScanOptions, ScanOutcome, scan_range
 from .reporting import log_report, validate_report_destination, write_log_report
 from .time_range import resolve_time_range
@@ -204,6 +205,15 @@ def write_trace_outcome(outcome: ScanOutcome, args: argparse.Namespace, stdout: 
                                      token=token, exit_code=outcome.exit_code)
 
 
+def present_trace_outcome(outcome: ScanOutcome, args: argparse.Namespace, stdout: TextIO, stderr: TextIO,
+                          *, token: str) -> ScanOutcome:
+    """Return a scan outcome with this presentation's evidence for final saving."""
+    matches = trace_matches(outcome.result, outcome.report['trace'])
+    report = present_trace(outcome.result, matches, outcome.report, args.output, stdout, stderr,
+                           service_field=args.service_field, destination=args.report, token=token)
+    return ScanOutcome(outcome.result, report, outcome.exit_code, outcome.intervals)
+
+
 def _write_trace_presentation(result: QueryResult, matches: QueryResult, report: dict[str, Any],
                               args: argparse.Namespace, stdout: TextIO, stderr: TextIO,
                               *, token: str, exit_code: int) -> int:
@@ -323,12 +333,12 @@ def run_trace(
                 work.validate_report(args.report)
                 work.require_new()
                 outcome = execute_scan(work)
-                code = write_trace_outcome(outcome, args, stdout, stderr, token=token)
+                outcome = present_trace_outcome(outcome, args, stdout, stderr, token=token)
                 work.save(outcome, identity=identity)
-                return code
+                return outcome.exit_code
         else:
             outcome = execute_scan()
-        return write_trace_outcome(outcome, args, stdout, stderr, token=token)
+        return present_trace_outcome(outcome, args, stdout, stderr, token=token).exit_code
     started, attempts = monotonic(), 0
 
     def counted_opener(request: Request, timeout: float) -> ReadableResponse:
@@ -354,10 +364,12 @@ def run_trace(
                              max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes)
     except QueryError as error:
         report = report_for(None, None, query_error_reason(error))
-        write_log_report(report, args.report, stderr, token=token)
+        # Failed retrievals have no timeline or candidate diagnostics.
+        present_logs(None, report, args.output, stdout, stderr, destination=args.report, token=token)
         raise
     matches = (matched_labels(result, args.trace_id, label_fields) if args.source == 'label'
                else matched_trace(result, args.trace_id, mapping))
     report = report_for(result, matches)
-    return _write_trace_presentation(result, matches, report, args, stdout, stderr,
-                                     token=token, exit_code=4 if result.skipped.incomplete else 0)
+    present_trace(result, matches, report, args.output, stdout, stderr,
+                  service_field=args.service_field, destination=args.report, token=token)
+    return 4 if result.skipped.incomplete else 0
