@@ -594,7 +594,8 @@ def _dispatch(
                     max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes,
             )
             present_logs(result, report, args.output, output_stream, error_stream,
-                         destination=args.report, token=token)
+                         destination=args.report, token=token,
+                         elapsed_seconds=lambda: max(0.0, monotonic() - started))
         else:
             set_retrieval_status(error_stream, "incomplete" if result.skipped.incomplete else "complete",
                                  parse_loss=result.skipped.incomplete)

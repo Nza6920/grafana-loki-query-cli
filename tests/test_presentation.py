@@ -69,7 +69,8 @@ class PresentationTests(unittest.TestCase):
             'status': 'complete',
             'coverage': {'resolved': [{'start_ns': '1', 'end_ns': '2'}], 'unresolved': []},
             'counts': {'raw_entries': 1, 'valid_records': 1},
-            'usage': {'current': {'http_attempts': 1, 'elapsed_seconds': 0.0}},
+            'usage': {'current': {'http_attempts': 1, 'elapsed_seconds': 0.0},
+                      'cumulative': {'http_attempts': 1, 'elapsed_seconds': 0.0}},
             'evidence': {'losses': {'historical': 1}},
         }
         original = deepcopy(report)
@@ -77,8 +78,10 @@ class PresentationTests(unittest.TestCase):
         stdout, stderr = StringIO(), StringIO()
         result = QueryResult('log', [LogEntry(1, {}, 'large')], raw_entries=1)
         presented = present_logs(result, report, 'raw', cast(TextIO, BudgetedStream(stdout, budget)),
-                                 cast(TextIO, BudgetedStream(stderr, budget)))
+                                 cast(TextIO, BudgetedStream(stderr, budget)), elapsed_seconds=lambda: 2.5)
         self.assertEqual(report, original)
+        self.assertEqual(presented['usage']['current']['elapsed_seconds'], 2.5)
+        self.assertEqual(presented['usage']['cumulative']['elapsed_seconds'], 2.5)
         self.assertEqual(presented['status'], 'complete')
         self.assertEqual(presented['evidence']['losses'], {'record_too_large': 1})
         self.assertEqual(presented['evidence']['local_evidence'], 'incomplete')

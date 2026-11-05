@@ -50,6 +50,38 @@ class CompletenessCliTests(unittest.TestCase):
     def read_report(self) -> Any:
         return json.loads(self.report.read_text(encoding="utf-8"))
 
+    def test_success_report_elapsed_includes_record_output_but_excludes_diagnostics(self) -> None:
+        elapsed = 10.0
+
+        class TimedOutput(StringIO):
+            def write(self, value: str) -> int:
+                nonlocal elapsed
+                elapsed = 13.0
+                return super().write(value)
+
+        class TimedDiagnostics(StringIO):
+            def write(self, value: str) -> int:
+                nonlocal elapsed
+                elapsed = 18.0
+                return super().write(value)
+
+        stdout, stderr = TimedOutput(), TimedDiagnostics()
+        code = main(
+            ["--config", str(self.config), "query", "--profile", "test",
+             "--report", str(self.report), "--output", "raw", "{}"],
+            environ={"TEST_TOKEN": "secret-token"}, stdout=stdout, stderr=stderr,
+            opener=lambda request, timeout: BytesIO(
+                b'{"status":"success","data":{"resultType":"streams",'
+                b'"result":[{"stream":{},"values":[["1","kept"]]}]}}'),
+            monotonic=lambda: elapsed, now=datetime(2026, 8, 11, tzinfo=UTC),
+        )
+        self.assertEqual(code, 0, stderr.getvalue())
+        self.assertEqual(stdout.getvalue(), "kept\n")
+        report = self.read_report()
+        self.assertEqual(report["usage"]["current"]["elapsed_seconds"], 3.0)
+        self.assertEqual(report["usage"]["cumulative"]["elapsed_seconds"], 3.0)
+        self.assertIn("elapsed 3.000s", stderr.getvalue())
+
     def test_empty_success_reports_resolved_absolute_range_and_preserves_defaults(self) -> None:
         self.assertEqual(self.invoke([]), 0, self.stderr.getvalue())
         report = self.read_report()
