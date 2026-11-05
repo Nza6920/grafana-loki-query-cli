@@ -11,6 +11,31 @@ from loki_query.presentation import present_logs, present_trace
 
 
 class PresentationTests(unittest.TestCase):
+    def test_offline_presentation_resets_current_losses_but_keeps_retrieval_history(self) -> None:
+        report: dict[str, Any] = {
+            'status': 'incomplete',
+            'coverage': {'resolved': [], 'unresolved': [{'reasons': ['parse_loss', 'response_bytes']}]},
+            'counts': {'raw_entries': 2, 'valid_records': 1, 'skipped_entries': 1, 'skipped_series': 0},
+            'usage': {'current': {'http_attempts': 2, 'elapsed_seconds': 0.0,
+                                  'skipped_entries': 1, 'skipped_series': 0}},
+            'current_losses': {'response_bytes': 1},
+            'evidence': {'losses': {'output_budget': 1}},
+        }
+        original = deepcopy(report)
+        budget = OutputBudget(4096, 4096)
+        stdout, stderr = StringIO(), StringIO()
+        result = QueryResult('log', [LogEntry(1, {}, 'kept')], raw_entries=2)
+        presented = present_logs(result, report, 'raw', cast(TextIO, BudgetedStream(stdout, budget)),
+                                 cast(TextIO, BudgetedStream(stderr, budget)), offline=True)
+        self.assertEqual(report, original)
+        self.assertEqual(presented['coverage'], original['coverage'])
+        self.assertEqual(presented['counts'], original['counts'])
+        self.assertEqual(presented['evidence']['upstream_retrieval'], 'incomplete')
+        self.assertEqual(presented['evidence']['local_evidence'], 'complete')
+        self.assertEqual(presented['usage']['current']['skipped_entries'], 0)
+        self.assertEqual(presented['current_losses'], {})
+        self.assertEqual(stdout.getvalue(), 'kept\n')
+
     def test_trace_presentation_returns_detached_evidence_without_changing_candidates(self) -> None:
         report: dict[str, Any] = {
             'status': 'complete',

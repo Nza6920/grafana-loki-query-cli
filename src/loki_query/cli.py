@@ -29,12 +29,12 @@ from .config import ConfigurationError, default_config_path, load_config
 from .persistence import WorkDirectory
 from .output import (write_result, BudgetedStream, OutputBudget, set_retrieval_status,
                      DEFAULT_RECORD_BYTES, MAX_RECORD_BYTES, DEFAULT_OUTPUT_BYTES, MAX_OUTPUT_BYTES)
-from .reporting import log_report, validate_report_destination, write_log_report
+from .reporting import log_report, validate_report_destination
 from .presentation import present_logs
 from .scanning import ScanOptions, ScanOutcome, scan_range
 from .time_range import TimeRangeError, resolve_time_range
 from .trace import (annotate_trace, configure_trace_parser, run_trace,
-                    validate_trace_resume, write_trace_outcome)
+                    validate_trace_resume, present_trace_outcome)
 
 
 EXIT_CONFIG = 2
@@ -396,16 +396,12 @@ def _dispatch(
         work = WorkDirectory(args.work_dir)
         work.validate_report(args.report)
         _, saved = work.load(args.max_retained_bytes)
-        saved.report['current_losses'] = {}
-        saved.report['usage']['current'] = {**saved.report['usage']['current'],
-                                            'skipped_entries': 0, 'skipped_series': 0}
-        saved.report.pop('evidence', None)
         if 'trace' in saved.report:
             if not args.service_field.strip():
                 raise ConfigurationError('Service field must not be empty.')
-            return write_trace_outcome(saved, args, output_stream, error_stream, token="")
-        write_result(saved.result, args.output, output_stream)
-        write_log_report(saved.report, args.report, error_stream, token="")
+            return present_trace_outcome(saved, args, output_stream, error_stream, token="", offline=True).exit_code
+        present_logs(saved.result, saved.report, args.output, output_stream, error_stream,
+                     destination=args.report, offline=True)
         return saved.exit_code
     if args.command == "resume":
         validate_report_destination(args.report)
@@ -443,13 +439,13 @@ def _dispatch(
             )
             if metadata is not None:
                 annotate_trace(outcome, metadata)
-                code = write_trace_outcome(outcome, args, output_stream, error_stream, token=resume_token)
+                outcome = present_trace_outcome(outcome, args, output_stream, error_stream, token=resume_token)
             else:
-                write_result(outcome.result, args.output, output_stream)
-                write_log_report(outcome.report, args.report, error_stream, token=resume_token)
-                code = outcome.exit_code
+                presented = present_logs(outcome.result, outcome.report, args.output,
+                                         output_stream, error_stream, destination=args.report, token=resume_token)
+                outcome = replace(outcome, report=presented)
             work.save(outcome, identity=identity)
-            return code
+            return outcome.exit_code
     if args.command == "config" and args.config_command == "path":
         print(selected_config_path, file=output_stream)
     elif args.command == "config" and args.config_command == "validate":

@@ -105,6 +105,43 @@ class PersistenceCliTests(unittest.TestCase):
                 self.assertEqual(code, 0, error)
                 self.assertEqual(json.loads(output)['line'], 'retrieved evidence')
 
+    def test_resume_and_export_output_failures_preserve_saved_records_and_final_accounting(self) -> None:
+        rows = [{'stream': {}, 'values': [['1', 'retrieved evidence']]}]
+        self.assertEqual(self.scan([[], rows], '--work-dir', str(self.work)), 0)
+        for command in ('resume', 'export'):
+            for failure in (BrokenPipeError('closed output'), KeyboardInterrupt(), SystemExit(7)):
+                with self.subTest(command=command, failure=type(failure).__name__):
+                    class FailedOutput(StringIO):
+                        def write(self, text: str, /) -> int:
+                            raise failure
+
+                    report = self.root / 'failed-report.json'
+                    stderr = StringIO()
+                    args = ['--config', str(self.config), command, '--work-dir', str(self.work),
+                            '--output', 'jsonl', '--report', str(report)]
+                    if command == 'resume':
+                        args.extend(['--profile', 'test', '--max-http-attempts', '1'])
+                    def invoke() -> int:
+                        return main(args, environ={}, stdout=FailedOutput(), stderr=stderr,
+                                    opener=lambda request, timeout: self.fail('resolved evidence queried Loki'))
+                    if command == 'resume' and isinstance(failure, OSError):
+                        self.assertEqual(invoke(), 2)
+                        self.assertNotIn('execution_interrupted', stderr.getvalue())
+                    else:
+                        with self.assertRaises(type(failure)) as raised:
+                            invoke()
+                        self.assertIs(raised.exception, failure)
+                        self.assertIn('execution_interrupted', stderr.getvalue())
+                    self.assertFalse(report.exists())
+                    if command == 'resume':
+                        self.assertEqual(stderr.getvalue().splitlines()[-1],
+                                         'HTTP attempt accounting: used=0 cap=1')
+                    else:
+                        self.assertIn('evidence: ', stderr.getvalue().splitlines()[-1])
+                    code, output, error = self.export()
+                    self.assertEqual(code, 0, error)
+                    self.assertEqual(json.loads(output)['line'], 'retrieved evidence')
+
     def test_archive_file_byte_cap_is_inclusive_and_refusal_preserves_state(self) -> None:
         rows = [{'stream': {'app': '中文'}, 'values': [['1', '多字节证据']]}]
         self.assertEqual(self.scan([[], rows], '--work-dir', str(self.work)), 0)
