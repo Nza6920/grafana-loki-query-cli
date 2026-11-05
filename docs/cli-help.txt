@@ -83,6 +83,10 @@ options:
 $ loki-query export --help
 usage: loki-query export [-h] --work-dir WORK_DIR [--output {human,raw,jsonl}]
                          [--service-field SERVICE_FIELD] [--report REPORT]
+                         [--max-record-bytes MAX_RECORD_BYTES]
+                         [--max-output-bytes MAX_OUTPUT_BYTES]
+                         [--max-response-bytes MAX_RESPONSE_BYTES]
+                         [--max-retained-bytes MAX_RETAINED_BYTES]
 
 options:
   -h, --help            show this help message and exit
@@ -91,6 +95,18 @@ options:
   --service-field SERVICE_FIELD
                         Trace service label for human output.
   --report REPORT       Write saved completeness JSON to this file.
+  --max-record-bytes MAX_RECORD_BYTES
+                        Complete rendered record bytes (1-8388608; default:
+                        4194304 / 4 MiB).
+  --max-output-bytes MAX_OUTPUT_BYTES
+                        Combined stdout/stderr bytes (1-33554432; default:
+                        1048576 / 1 MiB).
+  --max-response-bytes MAX_RESPONSE_BYTES
+                        Actual HTTP body bytes (1-67108864; default: 33554432
+                        / 32 MiB).
+  --max-retained-bytes MAX_RETAINED_BYTES
+                        Retained canonical UTF-8 bytes (1-268435456; default:
+                        67108864 / 64 MiB).
 
 $ loki-query resume --help
 usage: loki-query resume [-h] --work-dir WORK_DIR --profile PROFILE
@@ -102,6 +118,8 @@ usage: loki-query resume [-h] --work-dir WORK_DIR --profile PROFILE
                          [--service-field SERVICE_FIELD] [--trace-id TRACE_ID]
                          [--source {json,label}] [--selector SELECTOR]
                          [--field FIELDS] [--path PATHS] [--report REPORT]
+                         [--max-record-bytes MAX_RECORD_BYTES]
+                         [--max-output-bytes MAX_OUTPUT_BYTES]
                          [--max-response-bytes MAX_RESPONSE_BYTES]
                          [--max-retained-bytes MAX_RETAINED_BYTES]
 
@@ -126,6 +144,12 @@ options:
   --field FIELDS        Assert the saved trace field mapping.
   --path PATHS          Assert the saved trace JSON Pointer mapping.
   --report REPORT       Write current and cumulative completeness JSON.
+  --max-record-bytes MAX_RECORD_BYTES
+                        Complete rendered record bytes (1-8388608; default:
+                        4194304 / 4 MiB).
+  --max-output-bytes MAX_OUTPUT_BYTES
+                        Combined stdout/stderr bytes (1-33554432; default:
+                        1048576 / 1 MiB).
   --max-response-bytes MAX_RESPONSE_BYTES
                         Actual HTTP body bytes (1-67108864; default: 33554432
                         / 32 MiB).
@@ -145,6 +169,8 @@ usage: loki-query trace [-h] --profile PROFILE --selector SELECTOR
                         [--max-elapsed-seconds MAX_ELAPSED_SECONDS]
                         [--max-records MAX_RECORDS] [--work-dir WORK_DIR]
                         [--report REPORT]
+                        [--max-record-bytes MAX_RECORD_BYTES]
+                        [--max-output-bytes MAX_OUTPUT_BYTES]
                         [--max-response-bytes MAX_RESPONSE_BYTES]
                         [--max-retained-bytes MAX_RETAINED_BYTES]
                         trace_id
@@ -184,6 +210,12 @@ options:
   --work-dir WORK_DIR   Persist trace scan candidates and progress in this
                         directory.
   --report REPORT       Write trace completeness JSON to this file.
+  --max-record-bytes MAX_RECORD_BYTES
+                        Complete rendered record bytes (1-8388608; default:
+                        4194304 / 4 MiB).
+  --max-output-bytes MAX_OUTPUT_BYTES
+                        Combined stdout/stderr bytes (1-33554432; default:
+                        1048576 / 1 MiB).
   --max-response-bytes MAX_RESPONSE_BYTES
                         Actual HTTP body bytes (1-67108864; default: 33554432
                         / 32 MiB).
