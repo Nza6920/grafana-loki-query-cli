@@ -71,6 +71,40 @@ class PersistenceCliTests(unittest.TestCase):
         for path in self.work.iterdir():
             self.assertNotIn('private-bearer-value', path.read_text())
 
+    def test_output_failure_leaves_retrieved_checkpoint_before_final_presentation_save(self) -> None:
+        for index, failure in enumerate((BrokenPipeError('closed output'), KeyboardInterrupt(), SystemExit(7))):
+            with self.subTest(failure=type(failure).__name__):
+                class FailedOutput(StringIO):
+                    def write(self, text: str, /) -> int:
+                        raise failure
+
+                self.work = self.root / f'failed-output-{index}'
+                self.stdout, self.stderr = FailedOutput(), StringIO()
+                report = self.root / f'failed-report-{index}.json'
+                rows = [{'stream': {}, 'values': [['1', 'retrieved evidence']]}]
+                flags = ('--work-dir', str(self.work), '--report', str(report),
+                         '--end', '1970-01-01T00:00:01Z', '--max-http-attempts', '1')
+                if isinstance(failure, OSError):
+                    # The writer context retains its existing OSError-to-config
+                    # conversion even when the failed operation is output.
+                    self.assertEqual(self.scan([rows], *flags), 2)
+                    self.assertIn('Cannot access or publish', self.stderr.getvalue())
+                    self.assertNotIn('execution_interrupted', self.stderr.getvalue())
+                else:
+                    with self.assertRaises(type(failure)) as raised:
+                        self.scan([rows], *flags)
+                    self.assertIs(raised.exception, failure)
+                    self.assertIn('"execution_interrupted":1', self.stderr.getvalue())
+                self.assertFalse(report.exists())
+                self.assertEqual(self.stderr.getvalue().splitlines()[-1],
+                                 'HTTP attempt accounting: used=1 cap=1')
+                saved = json.loads((self.work / 'state.json').read_text())['payload']
+                self.assertEqual(saved['report']['status'], 'complete')
+                self.assertNotIn('evidence', saved['report'])
+                code, output, error = self.export()
+                self.assertEqual(code, 0, error)
+                self.assertEqual(json.loads(output)['line'], 'retrieved evidence')
+
     def test_archive_file_byte_cap_is_inclusive_and_refusal_preserves_state(self) -> None:
         rows = [{'stream': {'app': '中文'}, 'values': [['1', '多字节证据']]}]
         self.assertEqual(self.scan([[], rows], '--work-dir', str(self.work)), 0)

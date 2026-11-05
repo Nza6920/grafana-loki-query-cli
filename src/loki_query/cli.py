@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 import os
@@ -532,28 +533,19 @@ def _dispatch(
                     max_retained_bytes=args.max_retained_bytes),
                     opener=opener, sleeper=sleeper, monotonic=monotonic, progress=progress,
                 )
-            def present_scan(outcome: ScanOutcome) -> None:
-                set_retrieval_status(error_stream, outcome.report['status'],
-                                     parse_loss=bool(outcome.report['usage']['current']['skipped_entries']
-                                                     or outcome.report['usage']['current']['skipped_series']))
-                if isinstance(error_stream, BudgetedStream):
-                    for reason, count in outcome.report["current_losses"].items():
-                        error_stream.budget.mark_loss(reason, count)
-                write_result(outcome.result, args.output, output_stream)
-                write_log_report(outcome.report, args.report, error_stream, token=token)
 
             if args.work_dir is not None:
                 with WorkDirectory(args.work_dir).writer() as work:
                     work.validate_report(args.report)
                     work.require_new()
                     outcome = execute_scan(work.save)
-                    present_scan(outcome)
-                    # Presentation evidence is execution-local; retrieval status,
-                    # coverage and archived records retain their original meaning.
-                    work.save(outcome)
+                    presented = present_logs(outcome.result, outcome.report, args.output,
+                                             output_stream, error_stream, destination=args.report, token=token)
+                    work.save(replace(outcome, report=presented))
             else:
                 outcome = execute_scan()
-                present_scan(outcome)
+                present_logs(outcome.result, outcome.report, args.output,
+                             output_stream, error_stream, destination=args.report, token=token)
             return outcome.exit_code
         started = monotonic()
         attempts = 0
