@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 import os
@@ -28,11 +29,12 @@ from .config import ConfigurationError, default_config_path, load_config
 from .persistence import WorkDirectory
 from .output import (write_result, BudgetedStream, OutputBudget, set_retrieval_status,
                      DEFAULT_RECORD_BYTES, MAX_RECORD_BYTES, DEFAULT_OUTPUT_BYTES, MAX_OUTPUT_BYTES)
-from .reporting import log_report, validate_report_destination, write_log_report
+from .reporting import log_report, validate_report_destination
+from .presentation import present_logs
 from .scanning import ScanOptions, ScanOutcome, scan_range
 from .time_range import TimeRangeError, resolve_time_range
 from .trace import (annotate_trace, configure_trace_parser, run_trace,
-                    validate_trace_resume, write_trace_outcome)
+                    validate_trace_resume, present_trace_outcome)
 
 
 EXIT_CONFIG = 2
@@ -394,16 +396,12 @@ def _dispatch(
         work = WorkDirectory(args.work_dir)
         work.validate_report(args.report)
         _, saved = work.load(args.max_retained_bytes)
-        saved.report['current_losses'] = {}
-        saved.report['usage']['current'] = {**saved.report['usage']['current'],
-                                            'skipped_entries': 0, 'skipped_series': 0}
-        saved.report.pop('evidence', None)
         if 'trace' in saved.report:
             if not args.service_field.strip():
                 raise ConfigurationError('Service field must not be empty.')
-            return write_trace_outcome(saved, args, output_stream, error_stream, token="")
-        write_result(saved.result, args.output, output_stream)
-        write_log_report(saved.report, args.report, error_stream, token="")
+            return present_trace_outcome(saved, args, output_stream, error_stream, token="", offline=True).exit_code
+        present_logs(saved.result, saved.report, args.output, output_stream, error_stream,
+                     destination=args.report, offline=True)
         return saved.exit_code
     if args.command == "resume":
         validate_report_destination(args.report)
@@ -441,13 +439,13 @@ def _dispatch(
             )
             if metadata is not None:
                 annotate_trace(outcome, metadata)
-                code = write_trace_outcome(outcome, args, output_stream, error_stream, token=resume_token)
+                outcome = present_trace_outcome(outcome, args, output_stream, error_stream, token=resume_token)
             else:
-                write_result(outcome.result, args.output, output_stream)
-                write_log_report(outcome.report, args.report, error_stream, token=resume_token)
-                code = outcome.exit_code
+                presented = present_logs(outcome.result, outcome.report, args.output,
+                                         output_stream, error_stream, destination=args.report, token=resume_token)
+                outcome = replace(outcome, report=presented)
             work.save(outcome, identity=identity)
-            return code
+            return outcome.exit_code
     if args.command == "config" and args.config_command == "path":
         print(selected_config_path, file=output_stream)
     elif args.command == "config" and args.config_command == "validate":
@@ -531,28 +529,19 @@ def _dispatch(
                     max_retained_bytes=args.max_retained_bytes),
                     opener=opener, sleeper=sleeper, monotonic=monotonic, progress=progress,
                 )
-            def present_scan(outcome: ScanOutcome) -> None:
-                set_retrieval_status(error_stream, outcome.report['status'],
-                                     parse_loss=bool(outcome.report['usage']['current']['skipped_entries']
-                                                     or outcome.report['usage']['current']['skipped_series']))
-                if isinstance(error_stream, BudgetedStream):
-                    for reason, count in outcome.report["current_losses"].items():
-                        error_stream.budget.mark_loss(reason, count)
-                write_result(outcome.result, args.output, output_stream)
-                write_log_report(outcome.report, args.report, error_stream, token=token)
 
             if args.work_dir is not None:
                 with WorkDirectory(args.work_dir).writer() as work:
                     work.validate_report(args.report)
                     work.require_new()
                     outcome = execute_scan(work.save)
-                    present_scan(outcome)
-                    # Presentation evidence is execution-local; retrieval status,
-                    # coverage and archived records retain their original meaning.
-                    work.save(outcome)
+                    presented = present_logs(outcome.result, outcome.report, args.output,
+                                             output_stream, error_stream, destination=args.report, token=token)
+                    work.save(replace(outcome, report=presented))
             else:
                 outcome = execute_scan()
-                present_scan(outcome)
+                present_logs(outcome.result, outcome.report, args.output,
+                             output_stream, error_stream, destination=args.report, token=token)
             return outcome.exit_code
         started = monotonic()
         attempts = 0
@@ -593,11 +582,9 @@ def _dispatch(
                     max_http_attempts=min(3, args.max_http_attempts or 3),
                     max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes,
                 )
-                write_log_report(report, args.report, error_stream, token=token)
+                present_logs(None, report, args.output, output_stream, error_stream,
+                             destination=args.report, token=token)
             raise
-        set_retrieval_status(error_stream, "incomplete" if result.skipped.incomplete else "complete",
-                             parse_loss=result.skipped.incomplete)
-        write_result(result, args.output, output_stream)
         if args.query_type == "log":
             report = log_report(
                 profile=profile, query=query.strip(), start_ns=start_ns, end_ns=end_ns,
@@ -606,7 +593,13 @@ def _dispatch(
                 max_http_attempts=min(3, args.max_http_attempts or 3),
                     max_response_bytes=args.max_response_bytes, max_retained_bytes=args.max_retained_bytes,
             )
-            write_log_report(report, args.report, error_stream, token=token)
+            present_logs(result, report, args.output, output_stream, error_stream,
+                         destination=args.report, token=token,
+                         elapsed_seconds=lambda: max(0.0, monotonic() - started))
+        else:
+            set_retrieval_status(error_stream, "incomplete" if result.skipped.incomplete else "complete",
+                                 parse_loss=result.skipped.incomplete)
+            write_result(result, args.output, output_stream)
         if result.skipped.incomplete:
             if args.query_type == "log":
                 return EXIT_QUERY

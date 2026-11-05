@@ -87,7 +87,11 @@ class ScanCliTests(unittest.TestCase):
         self.assertEqual(report['coverage']['unresolved'], [])
         self.assertEqual(report['evidence']['losses'], {'record_too_large': 1})
         saved = json.loads((work / 'state.json').read_text())
-        self.assertIn('record_too_large', json.dumps(saved))
+        self.assertEqual(saved['payload']['report'], report)
+        self.assertEqual(saved['payload']['intervals'][0]['evidence']['records'], [
+            {'timestamp_ns': '2', 'labels': {}, 'line': 'small'},
+            {'timestamp_ns': '1', 'labels': {}, 'line': 'x' * 900},
+        ])
         self.stdout.seek(0)
         self.stdout.truncate()
         self.assertEqual(main(['export', '--work-dir', str(work), '--output', 'jsonl'],
